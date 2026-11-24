@@ -1,0 +1,14 @@
+{
+  "server_addr": "",
+  "view_resolution": [1600, 1600],
+  "refresh_hz": 72,
+  "ipd_meters": 0.063,
+  "pose_source": "phone-imu",
+  "pose_udp_port": 47110,
+  "codec": "h264",
+  "no_software_decoder": true,
+  "decoder_override": null,
+  "left_controller_dof": "6dof",
+  "right_controller_dof": "6dof",
+  "use_standard_loader": true
+}

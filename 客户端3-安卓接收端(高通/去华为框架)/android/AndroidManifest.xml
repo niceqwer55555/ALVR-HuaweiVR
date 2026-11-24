@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 去华为化的通用 ALVR 接收端 manifest。
+     删除了参考仓库全部 com.huawei.* 权限与 android.hardware.vr.headtracking required=true，
+     改用标准 OpenXR loader 权限。包名 com.generic.alvr 与华为无任何关系。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.generic.alvr"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-feature android:glEsVersion="0x00030002" android:required="true" />
+    <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />
+    <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="false" />
+    <!-- 不再声明 vr.headtracking required=true：通用手机无此 feature 也能装 -->
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 标准 Khronos OpenXR loader 权限；无 com.huawei.android.permission.VR -->
+
+    <application
+        android:label="通用 ALVR 接收端"
+        android:extractNativeLibs="true"
+        android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+        <activity
+            android:name=".AlvrActivity"
+            android:exported="true"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

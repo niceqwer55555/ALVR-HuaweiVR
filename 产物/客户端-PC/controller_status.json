@@ -1,0 +1,17 @@
+{
+  "_说明": "手柄状态注入（可选）。服务端 tracking 或手动填写后，GUI 的三个指示灯会优先读这里。connected=false 表示未连接(灰暗)，true 表示点亮。dof=3 或 6，battery_pct 为 0-100 或 -1 未知。",
+  "left": {
+    "connected": true,
+    "dof": 6,
+    "battery_pct": 85,
+    "source": "alvr",
+    "name": "左手柄"
+  },
+  "right": {
+    "connected": true,
+    "dof": 6,
+    "battery_pct": 62,
+    "source": "alvr",
+    "name": "右手柄"
+  }
+}

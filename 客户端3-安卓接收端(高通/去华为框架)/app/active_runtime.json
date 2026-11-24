@@ -1,0 +1,10 @@
+{
+  "file_format_version": "1.0.0",
+  "runtime": {
+    "library_path": "libgeneric_alvr_xr.so",
+    "api_version": "1.0.3",
+    "name": "generic_alvr_xr",
+    "vendor": "Open Source Community",
+    "version": "0.1.0"
+  }
+}

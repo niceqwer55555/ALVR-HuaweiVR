@@ -1,0 +1,39 @@
+{
+  "headset": {
+    "plugged": true,
+    "detected_by": "edid",
+    "edid": "DISPLAY\\HWV0003\\5&87bcb79&0&UID257_0",
+    "usb_ids": [
+      "12D1:&PID"
+    ],
+    "in_dfu": false
+  },
+  "phone": {
+    "plugged": false,
+    "serial": "",
+    "model": "",
+    "battery_pct": null,
+    "charging": false
+  },
+  "pc_battery": {
+    "present": true,
+    "pct": 98,
+    "charging": true
+  },
+  "left_controller": {
+    "connected": true,
+    "dof": 3,
+    "battery_pct": null,
+    "source": "hid",
+    "name": "HID-compliant game controller"
+  },
+  "right_controller": {
+    "connected": true,
+    "dof": 3,
+    "battery_pct": null,
+    "source": "hid",
+    "name": "HID-compliant game controller"
+  },
+  "alvr_connected": false,
+  "updated_at_ms": 1795525385121
+}

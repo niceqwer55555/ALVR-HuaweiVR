@@ -1,0 +1,25 @@
+[package]
+name = "hvr-alvr-win-sink"
+version = "0.1.0"
+edition = "2021"
+authors = ["Huawei VR Glass ALVR 接收端"]
+description = "华为 VR Glass 有线串流接收端：低配 PC 收 ALVR 流并以 SBS 立体输出到插在 PC 上的眼镜"
+
+# 设计说明：
+# 本 crate 刻意不依赖上游 ALVR workspace。原因见 docs/01-架构与可行性.md：
+#   1) 上游根 Cargo.toml 的 [patch.crates-io] wgpu-hal = deps/wgpu-hal-huawei 指向缺失目录；
+#   2) 华为 OpenXR fork(deps/openxrs-huawei) 未随仓库提供；
+#   3) alvr_session/common 依赖 git 上的 settings-schema-rs，离线不可得。
+# 因此线协议（packets/sockets/connection）在 src/protocol.rs、src/client.rs 中按
+# 上游源码逐字段重写，做到零上游依赖、可独立编译、可单元测试。
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[profile.release]
+opt-level = 3
+strip = true

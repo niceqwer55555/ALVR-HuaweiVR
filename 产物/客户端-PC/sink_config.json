@@ -1,0 +1,12 @@
+{
+  "hostname": "HVR-SINK",
+  "view_resolution": [1536, 1536],
+  "target_fps": 70.0,
+  "ipd_m": 0.063,
+  "stream_port": 9944,
+  "stereo_layout": "sbs",
+  "fov": [
+    [0.829, 0.829, 0.829, 0.829],
+    [0.829, 0.829, 0.829, 0.829]
+  ]
+}
