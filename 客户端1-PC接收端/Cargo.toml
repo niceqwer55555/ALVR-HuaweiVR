@@ -20,6 +20,22 @@ bincode = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+# 单 exe GUI：Win32 窗口 + Direct3D11 渲染（眼镜 SBS 输出）
+# 仅 Windows 目标需要；用 target_os 条件避免非 Windows 编译失败。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+] }
+
 [profile.release]
 opt-level = 3
 strip = true

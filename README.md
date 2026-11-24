@@ -44,7 +44,7 @@ ALVR-HuaweiVR-完整交付包/
 │   ├── 服务端/libalvr_server_core.rlib         ✅ Rust 静态库 33 MB
 │   ├── 服务端/openvr/driver_alvr_server.dll   ✅ PE32+ 15 MB（OpenVR 驱动）
 │   ├── 服务端/openvr/openvr_api.dll           ✅ OpenVR API 运行库
-│   ├── 客户端-PC/HVR-VRGlass-接收端.exe        ✅ PE32+ GUI 双击即用（四指示灯，含 ALVR 串流）
+│   ├── 客户端-PC/HVR-VRGlass-接收端.exe        ✅ 单 exe：GUI + 连接引擎 + 眼镜渲染三合一
 │   ├── 客户端-PC/ffmpeg.exe                    ✅ 随包 FFmpeg，核心自动查找（GUI 免环境配置）
 │   ├── 客户端-PC/hvr-alvr-win-sink.exe         ✅ PE32+ 1.5 MB（核心引擎）
 │   ├── 客户端-PC/device_status.json            ✅ 设备状态样例（指示灯数据源）
@@ -102,7 +102,7 @@ ALVR-HuaweiVR-完整交付包/
 |---|---|---|
 | `alvr_server_core.dll` | cargo + mingw target | ✅ PE32+ DLL，118 MB |
 | `libalvr_server_core.rlib/.dll.a` | 同上 | ✅ 静态库/导入库 |
-| `HVR-VRGlass-接收端.exe`（PC GUI） | mingw gcc -mwindows | ✅ PE32+ GUI，四指示灯（含 ALVR 串流连接态） |
+| `HVR-VRGlass-接收端.exe`（PC 单 exe） | Rust windows crate | ✅ GUI + 连接 + D3D/GDI 眼镜渲染，单文件双击即用 |
 | `hvr-alvr-win-sink.exe`（核心引擎） | cargo + mingw target | ✅ PE32+ 1.5 MB，Wine rc=0 |
 | `driver_alvr_server.dll`（OpenVR 服务端） | 上游官方 Release 同源产物 | ✅ PE32+ 15 MB |
 | `libgeneric_alvr_bridge.so` | NDK r25c clang aarch64 | ✅ ELF aarch64，15 个 JNI 符号 |

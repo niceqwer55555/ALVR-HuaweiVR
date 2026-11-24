@@ -11,6 +11,10 @@ mod protocol;
 mod client;
 mod decoder;
 mod render_bridge;
+#[cfg(windows)]
+mod renderer;
+#[cfg(windows)]
+mod gui_app;
 mod status;
 
 use client::{run, ClientConfig, RunSummary};
@@ -110,6 +114,14 @@ fn main() {
     tracing_subscriber::fmt().with_target(false).init();
 
     let args: Vec<String> = std::env::args().collect();
+    // 无参数 / --auto-start = GUI 模式（双击即用，核心与渲染都在本进程内）
+    #[cfg(windows)]
+    if args.len() == 1 || args.iter().any(|a| a == "--auto-start") {
+        if let Err(e) = gui_app::run_gui_with_autostart(args.iter().any(|a| a == "--auto-start")) {
+            eprintln!("[hvr-sink] GUI 启动失败: {e}");
+        }
+        return;
+    }
     if args.iter().any(|a| a == "--selftest") {
         selftest();
         return;
