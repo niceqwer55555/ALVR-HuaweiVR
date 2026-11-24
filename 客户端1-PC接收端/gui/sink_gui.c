@@ -47,9 +47,11 @@ static HWND  g_stateEdit, g_logEdit, g_ledPanel;
 static HWND  g_btnStart, g_btnStop, g_btnStatus, g_btnSelf, g_btnClear;
 static HFONT g_font = NULL;
 static PROCESS_INFORMATION g_pi = {0};
+static PROCESS_INFORMATION g_renderPi = {0};
 static int   g_running = 0;
 static wchar_t g_exeDir[MAX_PATH];
 static wchar_t g_corePath[MAX_PATH];
+static wchar_t g_renderPath[MAX_PATH];
 static wchar_t g_statusPath[MAX_PATH];
 
 /* UTF-8 字节 -> 新分配的宽字符串（调用方 free） */
@@ -299,8 +301,37 @@ static int run_core(LPCWSTR args, int track_handle) {
     return 1;
 }
 
+/* ---------- 启动眼镜渲染器（D3D11 SBS，监听 9911 收解码帧） ---------- */
+static void start_renderer(void) {
+    if (g_renderPi.hProcess) return; /* 已启动 */
+    if (GetFileAttributesW(g_renderPath) == INVALID_FILE_ATTRIBUTES) {
+        append_log(L"[警告] 未找到 renderer\\HwVRDesktop.exe，眼镜将无画面\r\n");
+        return;
+    }
+    wchar_t cmd[1024];
+    swprintf(cmd, 1024, L"\"%ls\"", g_renderPath);
+    wchar_t rdir[MAX_PATH];
+    swprintf(rdir, MAX_PATH, L"%lsrenderer", g_exeDir);
+    STARTUPINFOW si; memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
+    PROCESS_INFORMATION pi; memset(&pi, 0, sizeof(pi));
+    if (CreateProcessW(g_renderPath, cmd, NULL, NULL, FALSE,
+                       CREATE_NO_WINDOW, NULL, rdir, &si, &pi)) {
+        g_renderPi = pi;
+        append_log(L"[系统] 眼镜渲染器已启动（3200x1600 SBS，监听 9911）\r\n");
+    } else {
+        append_log(L"[错误] 眼镜渲染器启动失败\r\n");
+    }
+}
+
 /* ---------- 停止核心引擎 ---------- */
 static void stop_core(void) {
+    if (g_renderPi.hProcess) {
+        TerminateProcess(g_renderPi.hProcess, 0);
+        CloseHandle(g_renderPi.hThread);
+        CloseHandle(g_renderPi.hProcess);
+        memset(&g_renderPi, 0, sizeof(g_renderPi));
+        append_log(L"[系统] 已停止眼镜渲染器\r\n");
+    }
     if (g_running && g_pi.hProcess) {
         TerminateProcess(g_pi.hProcess, 0);
         CloseHandle(g_pi.hThread);
@@ -378,6 +409,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         wchar_t *slash = wcsrchr(g_exeDir, L'\\');
         if (slash) *(slash + 1) = L'\0';
         swprintf(g_corePath, MAX_PATH, L"%lshvr-alvr-win-sink.exe", g_exeDir);
+        swprintf(g_renderPath, MAX_PATH, L"%lsrenderer\\HwVRDesktop.exe", g_exeDir);
         swprintf(g_statusPath, MAX_PATH, L"%lsdevice_status.json", g_exeDir);
 
         append_log(L"[系统] HVR VR Glass 串流接收端已就绪\r\n");
@@ -405,6 +437,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 append_log(L"[提示] 串流引擎已在运行\r\n");
             } else {
                 append_log(L"[系统] 正在启动串流引擎...\r\n");
+                start_renderer();  /* 先起眼镜渲染器，再起连接核心 */
                 run_core(L"--config sink_config.json", 1);
             }
             break;
