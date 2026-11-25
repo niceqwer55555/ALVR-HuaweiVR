@@ -9,6 +9,10 @@ typedef void* (*PFN_Pose)(void* out);
 typedef void  (*PFN_Void)();
 
 static const wchar_t* kCandidates[] = {
+    // [HVR fix] 实际安装路径优先（F 盘华为助手），原来只探测 C 盘硬编码路径导致
+    // "官方 Hmd.dll 没找到" → 头显姿态全零 → 画面不跟随头显移动。
+    L"F:\\PY\\HwPCVR Assistant\\pcCastScreen",
+    L"F:\\PY\\HwPCVR Assistant\\steamVRDriver\\huaweiVR\\bin\\win64",
     L"C:\\Program\\HwPCVR Assistant\\pcCastScreen",
     L"C:\\Program Files\\HwVRGlassLite\\steamVRDriver\\huaweiVR\\bin\\win64",
     NULL
