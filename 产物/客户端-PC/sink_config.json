@@ -7,6 +7,7 @@
   "target_fps": 70.0,
   "ipd_m": 0.063,
   "stream_port": 9944,
+  "server_ip": "192.168.43.61",
   "stereo_layout": "sbs",
   "fov": [
     [

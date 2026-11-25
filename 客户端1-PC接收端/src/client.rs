@@ -32,6 +32,9 @@ pub struct ClientConfig {
     pub refresh_rates: Vec<f32>,
     pub microphone_sample_rate: u32,
     pub stream_port: u16,
+    /// 可选：已知服务端 IP。设置后除了广播发现，还直接向此 IP 单播发现包
+    /// （应对手机热点/路由器 AP 隔离导致广播不转发的情况）
+    pub server_ip: Option<Ipv4Addr>,
     /// auto / tcp / udp；auto 时按服务端 session 的 connection.stream_protocol 协商
     pub stream_protocol: String,
     pub protocol_id_u64: u64,
@@ -51,6 +54,7 @@ impl Default for ClientConfig {
             refresh_rates: vec![70.0, 72.0],
             microphone_sample_rate: 48000,
             stream_port: 9944,
+            server_ip: None,
             stream_protocol: "auto".into(),
             // 上游 alvr_common::protocol_id_u64() = hash_string("20")（Rust DefaultHasher/SipHash），
             // 不是字面量 20。发错值服务端会 warn「incompatible client」，华为版虽不拒绝但应如实上报。
@@ -98,29 +102,37 @@ impl SessionInfo {
 /// 流通道抽象：TCP 面向字节流，UDP 面向分片数据报；上层解析逻辑一致。
 enum StreamChannel {
     Tcp(TcpStream),
-    Udp(UdpSocket),
+    // [HVR fix] 用 recv_from/send_to 而非 connect/send：服务端可能从与
+    // server_ip:stream_port 不同的源地址发流（多网卡/NAT），connect 会过滤掉
+    // 这些包导致永远收不到视频。记录真实对端，回传 tracking 发往同一地址。
+    Udp { sock: UdpSocket, peer: Option<SocketAddr>, fallback: SocketAddr },
 }
 
 impl StreamChannel {
     fn set_read_timeout(&self, timeout: Duration) -> std::io::Result<()> {
         match self {
             Self::Tcp(s) => s.set_read_timeout(Some(timeout)),
-            Self::Udp(s) => s.set_read_timeout(Some(timeout)),
+            Self::Udp { sock, .. } => sock.set_read_timeout(Some(timeout)),
         }
     }
 
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Self::Tcp(s) => s.read(buf),
-            Self::Udp(s) => s.recv(buf),
+            Self::Udp { sock, peer, .. } => {
+                let (n, src) = sock.recv_from(buf)?;
+                *peer = Some(src);
+                Ok(n)
+            }
         }
     }
 
     fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
         match self {
             Self::Tcp(s) => s.write_all(data),
-            Self::Udp(s) => {
-                let n = s.send(data)?;
+            Self::Udp { sock, peer, fallback } => {
+                let dst = peer.unwrap_or(*fallback);
+                let n = sock.send_to(data, dst)?;
                 if n != data.len() {
                     Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "UDP 分片未完整发送"))
                 } else {
@@ -266,6 +278,11 @@ where
         discovery
             .send_to(&pkt, (Ipv4Addr::BROADCAST, CONTROL_PORT))
             .ok();
+        // [HVR fix] 同时向已知服务端 IP 单播发现包。AP 隔离下广播不跨客户端转发，
+        // 但服务端→客户端方向的 TCP 是通的，单播能触达服务端触发它回连。
+        if let Some(sip) = cfg.server_ip {
+            discovery.send_to(&pkt, (sip, CONTROL_PORT)).ok();
+        }
         match listener.accept() {
             Ok((s, addr)) => {
                 server_ip = addr.ip();
@@ -361,10 +378,11 @@ where
     let mut stream: StreamChannel = if protocol.eq_ignore_ascii_case("udp") {
         let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, stream_port))
             .map_err(|e| format!("绑定 UDP 流端口 {stream_port} 失败: {e}"))?;
-        sock.connect((server_ip, stream_port))
-            .map_err(|e| format!("UDP 连接服务端 {server_ip}:{stream_port} 失败: {e}"))?;
+        // [HVR fix] 不 connect，避免过滤掉来自服务端其它源地址的流包；
+        // fallback 用作尚未收到任何包时 tracking 的回传目标。
+        let fallback = SocketAddr::new(server_ip, stream_port);
         control.write_all(&ready).map_err(|e| format!("发送 StreamReady: {e}"))?;
-        StreamChannel::Udp(sock)
+        StreamChannel::Udp { sock, peer: None, fallback }
     } else {
         let stream_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, stream_port))
             .map_err(|e| format!("绑定 TCP 流端口 {stream_port} 失败: {e}"))?;
