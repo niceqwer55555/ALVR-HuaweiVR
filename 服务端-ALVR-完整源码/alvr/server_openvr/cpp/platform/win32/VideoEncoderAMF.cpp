@@ -7,7 +7,7 @@
     {                                                                                              \
         AMF_RESULT res = expr;                                                                     \
         if (res != AMF_OK) {                                                                       \
-            throw MakeException("AMF Error %d. %s", res, L#expr);                                  \
+            throw MakeException("AMF Error %d. %s", res, #expr);                                  \
         }                                                                                          \
     }
 
