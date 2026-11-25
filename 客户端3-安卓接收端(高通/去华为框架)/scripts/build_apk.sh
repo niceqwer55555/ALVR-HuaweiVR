@@ -1,51 +1,89 @@
 #!/usr/bin/env bash
-# 通用安卓 ALVR 接收端 —— 完整 APK 打包（arm64-v8a / Android 11+）
-# 依赖：Android NDK r25c + build-tools 34 + platform android-34（本机 /opt）
+# 通用安卓 ALVR 接收端 —— 可复现 APK 打包（arm64-v8a / Android 7+）
+# 自动探测 NDK / Build-Tools / android.jar；无完整 JDK 时给出明确错误。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-NDK=/opt/android-ndk-r25c
-SDK=/opt/android-sdk
-BT="$SDK/build-tools/34/android-14"
-PLATFORM="$SDK/platforms/android-34/android-34"
-CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-JAVA_HOME_BIN="$(dirname "$(readlink -f "$(command -v javac)")")"
+find_one() {
+  local kind="$1"; shift
+  for p in "$@"; do
+    if [ -n "$p" ] && [ -e "$p" ]; then echo "$p"; return 0; fi
+  done
+  return 1
+}
 
-echo "=== 0. 环境 ==="
+NDK="$(find_one ndk \
+  "${ANDROID_NDK_HOME:-}" \
+  "${ANDROID_NDK_ROOT:-}" \
+  /home/user/ndk/android-ndk-r25c \
+  /opt/android-ndk-r25c \
+  /opt/android-ndk)" || { echo "缺 Android NDK r25c：设置 ANDROID_NDK_HOME"; exit 1; }
+
+BT="$(find_one build-tools \
+  "${ANDROID_BUILD_TOOLS:-}" \
+  /home/user/bt/android-14 \
+  /opt/android-sdk/build-tools/34/android-14 \
+  /opt/android-sdk/build-tools/34.0.0 \
+  "${ANDROID_SDK_ROOT:-}/build-tools/34.0.0" \
+  "${ANDROID_SDK_ROOT:-}/build-tools/34/android-14")" || {
+  echo "缺 Android build-tools 34（aapt2/d8/zipalign/apksigner）"; exit 1; }
+
+PLATFORM="$(find_one platform \
+  "${ANDROID_PLATFORM:-}" \
+  /home/user/platform/android-34 \
+  /opt/android-sdk/platforms/android-34/android-34 \
+  /opt/android-sdk/platforms/android-34 \
+  "${ANDROID_SDK_ROOT:-}/platforms/android-34")" || {
+  echo "缺 android-34 platform（android.jar）"; exit 1; }
+
+CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
 [ -x "$CC" ] || { echo "缺 NDK clang: $CC"; exit 1; }
 [ -f "$BT/aapt2" ] || { echo "缺 aapt2: $BT/aapt2"; exit 1; }
+[ -f "$BT/d8" ] || { echo "缺 d8: $BT/d8"; exit 1; }
 [ -f "$PLATFORM/android.jar" ] || { echo "缺 android.jar: $PLATFORM/android.jar"; exit 1; }
-echo "NDK: $NDK"; echo "build-tools: $BT"; echo "platform: $PLATFORM"
 
-rm -rf build/apkwork && mkdir -p build/apkwork/{lib/arm64-v8a,assets,classes,gen,unsigned}
+JAVAC="${JAVAC:-$(command -v javac || true)}"
+if [ -z "$JAVAC" ] && [ -x "${JAVA_HOME:-}/bin/javac" ]; then JAVAC="$JAVA_HOME/bin/javac"; fi
+if [ -z "$JAVAC" ]; then
+  echo "缺 javac。安装 OpenJDK 17 后重试：sudo apt-get install -y openjdk-17-jdk-headless"
+  exit 1
+fi
+
+echo "NDK: $NDK"
+echo "build-tools: $BT"
+echo "platform: $PLATFORM"
+echo "javac: $JAVAC"
+
+rm -rf build/apkwork && mkdir -p build/apkwork/{lib/arm64-v8a,assets,classes,gen,unsigned,dex_out}
 mkdir -p build/android/lib/arm64-v8a
 
 echo "=== 1. 编译 native 核心 + JNI 桥 ==="
 CFLAGS="-std=c11 -O2 -fPIC -ffunction-sections -fdata-sections -Wall"
 INC="-Isrc/pose -Isrc/controller -Isrc/decoder -Isrc/runtime -Isrc/hid"
-$CC $CFLAGS $INC -shared \
+"$CC" $CFLAGS $INC -shared \
   src/pose/pose.c src/controller/controller.c \
   src/decoder/decoder_policy.c src/runtime/generic_runtime.c \
   src/hid/hwvr_hid.c android/jni_bridge.c \
   -lm -Wl,--gc-sections \
   -o build/apkwork/lib/arm64-v8a/libgeneric_alvr_bridge.so
+cp build/apkwork/lib/arm64-v8a/libgeneric_alvr_bridge.so build/android/lib/arm64-v8a/
 
-echo "=== 2. OpenXR runtime 库（headers 可用时）==="
-if [ -f src/runtime/runtime_openxr.c ] && [ -d /opt/openxr/include ]; then
-  $CC $CFLAGS $INC -I/opt/openxr/include -shared \
+echo "=== 2. 可选 OpenXR runtime 库 ==="
+if [ -f src/runtime/runtime_openxr.c ] && [ -n "${OPENXR_HEADERS:-}" ]; then
+  "$CC" $CFLAGS $INC -I"$OPENXR_HEADERS" -shared \
     src/runtime/runtime_openxr.c src/runtime/generic_runtime.c \
     src/pose/pose.c src/controller/controller.c src/decoder/decoder_policy.c src/hid/hwvr_hid.c \
     -lm -o build/apkwork/lib/arm64-v8a/libgeneric_alvr_xr.so
   echo "  -> libgeneric_alvr_xr.so"
 else
-  echo "  [跳过] 无 runtime_openxr.c 源码（平台桥已编入 bridge 库）"
+  echo "  [跳过] libgeneric_alvr_xr.so（无 runtime_openxr.c 或未设置 OPENXR_HEADERS）"
 fi
 
 cp app/active_runtime.json build/apkwork/assets/
 [ -f app/client_config.json ] && cp app/client_config.json build/apkwork/assets/
 
-echo "=== 3. aapt2 生成基础 APK（manifest，无资源）==="
+echo "=== 3. aapt2 生成基础 APK ==="
 "$BT/aapt2" link -o build/apkwork/base.apk \
   -I "$PLATFORM/android.jar" \
   --manifest android/AndroidManifest.xml \
@@ -53,13 +91,13 @@ echo "=== 3. aapt2 生成基础 APK（manifest，无资源）==="
   --min-sdk-version 24 --target-sdk-version 34
 
 echo "=== 4. javac 编译 Java host ==="
-mkdir -p build/apkwork/gen_src
-javac -encoding UTF-8 -cp "$PLATFORM/android.jar" -d build/apkwork/classes \
+"$JAVAC" -encoding UTF-8 -source 8 -target 8 \
+  -cp "$PLATFORM/android.jar" -d build/apkwork/classes \
   android/java/com/generic/alvr/*.java
 
 echo "=== 5. d8 生成 classes.dex ==="
-mkdir -p build/apkwork/dex_out
-"$BT/d8" --output build/apkwork/dex_out $(find build/apkwork/classes -name "*.class")
+"$BT/d8" --lib "$PLATFORM/android.jar" --output build/apkwork/dex_out \
+  $(find build/apkwork/classes -name "*.class")
 cp build/apkwork/dex_out/classes.dex build/apkwork/
 
 echo "=== 6. 合并资源 + native 库 + assets + dex ==="
@@ -79,7 +117,7 @@ fi
   --out build/GenericALVR-arm64.apk build/apkwork/aligned.apk
 
 echo "=== 8. 验证 ==="
-"$BT/apksigner" verify -v build/GenericALVR-arm64.apk || true
-"$BT/aapt2" dump badging build/GenericALVR-arm64.apk 2>/dev/null | head -5 || true
+"$BT/apksigner" verify -v build/GenericALVR-arm64.apk
+"$BT/aapt2" dump badging build/GenericALVR-arm64.apk 2>/dev/null | head -8 || true
 ls -lh build/GenericALVR-arm64.apk
 echo "完成: build/GenericALVR-arm64.apk"

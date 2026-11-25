@@ -1,0 +1,2 @@
+41272dbd5eeec8d956a577ac73b4770bdd4d5088668e3d68685f93053777a404  GenericALVR-arm64.apk
+3147ecd0d48f21a4e36ef6129cee8829191f3be0757b909cde4a80c6f4ddcf2e  libs/arm64-v8a/libgeneric_alvr_bridge.so

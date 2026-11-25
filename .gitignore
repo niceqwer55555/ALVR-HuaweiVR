@@ -33,3 +33,7 @@ crash_log.txt
 # ===== 运行时状态（交付包保留模板，但不跟踪运行时写入的 JSON） =====
 产物/客户端-PC/device_status.json
 产物/服务端/openvr/session_invalid.json
+
+# ===== 本轮大体积编译交付（GitHub 单文件/仓库体积考虑，放 Releases 或飞书云盘） =====
+产物/Windows-全量编译-20261125/
+产物/Windows-全量编译-20261125.zip

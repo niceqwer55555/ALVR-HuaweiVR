@@ -122,9 +122,9 @@ ALVR-HuaweiVR-完整交付包/
 本轮已安装 Android NDK r25c + build-tools 34 + platform android-34，全部可编译产物均已产出：
 
 - **OpenVR 服务端驱动 DLL**：`driver_alvr_server.dll` 来自上游 `HuaweiVRGlass-ALVR` 官方 Windows v0.5.0 Release（与交付包源码同源、针对华为 VR Glass 定制），PE32+，随包附 `openvr_api.dll` 与运行库，可直接被 SteamVR 加载。源码侧的 `server_core` 仍为沙箱内 mingw 真实交叉编译产物。
-- **客户端③ APK**：已用 NDK 编译 JNI 桥（arm64-v8a，15 个 native 方法符号与 Java 声明一致，含新增的手柄状态查询/电量接口）、aapt2 + d8 + apksigner 打包签名，验证通过；同时修复了 `AlvrActivity.java` 注释中 `*/` 提前闭合块注释导致编译失败的缺陷。构建脚本 `scripts/build_apk.sh` 可复现。
+- **客户端③ APK**：已用 NDK 编译 JNI 桥（arm64-v8a，15 个 native 方法符号与 Java 声明一致）、aapt2 + d8 + zipalign + apksigner 打包签名，验证通过；补齐了缺失的 `android/java/com/generic/alvr/AlvrActivity.java`，构建脚本 `scripts/build_apk.sh` 会自动探测 NDK/build-tools/android.jar。注意：该 APK 是平台桥/诊断壳，不含 ALVR 控制协议与视频解码，不能直接出串流画面。
 - **三设备状态指示灯**（本轮新增）：PC 接收端 GUI 用自绘圆灯显示头显/左手柄/右手柄——在线绿色点亮、离线灰暗，显示 DoF 与电量；安卓端 App 左上角同样三个指示灯，触摸左右半屏即点亮对应手柄。PC 状态模型新增 `left_controller`/`right_controller`，`device_status.json` 可由服务端 tracking 注入（`controller_status.json`）覆盖；安卓新增 `nativeGetControllerStatus` JNI 接口。
-- **客户端② APK**（依赖华为框架）：依赖仓库外华为闭源 SDK（`libxr_loader.so`、`hvrbridge.jar`、`hvrprompt.aar`），此环境无法获取授权库，源码原样保留，用官方 `build-android.ps1` 在有华为 SDK 的环境构建。
+- **客户端② APK**（依赖华为框架）：依赖华为闭源 SDK（`libxr_loader.so`、`hvrbridge.jar`、`hvrprompt.aar`）以及已丢失的 `deps/openxrs-huawei` Rust fork；本仓库只剩 manifest/源码片段，无法在当前环境重编。保留原源码，需从授权来源补齐依赖后构建。
 
 真机点亮 / 串流 / 手柄互通仍需在华为 VR Glass + 高通手机实机验证（沙箱无硬件）。
 - **真机点亮 / 串流互通 / 手柄实测**：需真机环境。
