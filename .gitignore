@@ -47,3 +47,6 @@ dist/
 产物/客户端-PC/sink_err_live.log
 产物/客户端-PC/sink_out_live.log
 产物/客户端-PC/ffmpeg_stderr.log
+
+# 渲染器编译中间产物
+客户端1-PC接收端/renderer-src/src/HwVRDesktop_new.exe
