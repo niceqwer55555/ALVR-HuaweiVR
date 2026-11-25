@@ -44,6 +44,9 @@ jobs:
           git clone --depth 1 https://github.com/microsoft/DirectXMath.git /tmp/DirectXMath
           rm -rf "$DEPS/directxmath" && mkdir -p "$DEPS/directxmath"
           cp /tmp/DirectXMath/Inc/*.h /tmp/DirectXMath/Inc/*.inl "$DEPS/directxmath/"
+          # Linux 大小写敏感，源码里是小写 include
+          cp "$DEPS/directxmath/DirectXColors.h" "$DEPS/directxmath/directxcolors.h"
+          cp "$DEPS/directxmath/DirectXMath.h" "$DEPS/directxmath/directxmath.h"
 
       - name: 交叉编译 Windows 服务端
         working-directory: 服务端-ALVR-完整源码
