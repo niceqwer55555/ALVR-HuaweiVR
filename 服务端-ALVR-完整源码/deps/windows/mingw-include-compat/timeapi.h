@@ -1,6 +1,7 @@
 #pragma once
 // MinGW 的 mmsystem.h 在某些发行版里不导出 timer API（TIMECAPS/timeBeginPeriod 等）。
 // 这里统一补上声明与常量，保证 MSVC 源码在 MinGW 下也能编译。
+#include <windows.h>
 #include <mmsystem.h>
 
 #ifndef TIMECAPS
