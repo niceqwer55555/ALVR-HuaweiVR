@@ -40,3 +40,9 @@ crash_log.txt
 
 # 工作流本地打包输出
 dist/
+
+# 渲染器运行时抓帧/日志产物
+产物/客户端-PC/renderer/*.bmp
+产物/客户端-PC/sink_live.log
+产物/客户端-PC/sink_err_live.log
+产物/客户端-PC/sink_out_live.log
