@@ -130,6 +130,15 @@ fn decoder_thread<F>(
     // 写线程：NAL → FFmpeg stdin
     let stop_w = Arc::clone(&stop);
     let writer = thread::spawn(move || {
+        // [HVR fix] 服务端未下发 SPS/PPS（DecoderConfig 通道不通）时，注入默认
+        // H.264 SPS/PPS（3072x1536 = SBS 双目 1536x1536），让 ffmpeg 能初始化解码器。
+        // 取自 libx264 对 3072x1536 的输出，profile/level 与服务端 SW 编码兼容。
+        const DEFAULT_SPSPPS: &[u8] = &[
+            0x00,0x00,0x00,0x01,0x67,0x42,0xc0,0x32,0xda,0x00,0xc0,0x03,0x06,0xc0,0x44,0x00,
+            0x00,0x03,0x00,0x04,0x00,0x00,0x03,0x00,0xc8,0x3c,0x60,0xca,0x80,
+            0x00,0x00,0x00,0x01,0x68,0xce,0x0f,0xc8,
+        ];
+        if stdin.write_all(DEFAULT_SPSPPS).is_ok() { let _ = stdin.flush(); }
         while !stop_w.load(Ordering::Relaxed) {
             match rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(nal) => {
@@ -143,11 +152,12 @@ fn decoder_thread<F>(
     });
 
     // 读线程（本线程）：FFmpeg stdout → BGRA 帧 → 回调
+    // [HVR fix] 单帧 BGRA 可达 ~19MB，100ms 内读不完；超时会丢弃已读部分导致永远组不出帧。
+    // 改为：单次 read 阻塞读取（不设短超时），只在 ffmpeg 退出(Eof)时结束。
     let mut frame = vec![0u8; frame_bytes];
     while !stop.load(Ordering::Relaxed) {
-        match read_exact_timeout(&mut stdout, &mut frame, std::time::Duration::from_millis(100)) {
+        match read_exact_blocking(&mut stdout, &mut frame) {
             Ok(()) => on_bgra(&frame, w, h),
-            Err(ReadErr::Timeout) => continue,
             Err(ReadErr::Eof) => break,
         }
     }
@@ -156,15 +166,12 @@ fn decoder_thread<F>(
     let _ = child.wait();
 }
 
-enum ReadErr { Timeout, Eof }
+enum ReadErr { Eof }
 
-fn read_exact_timeout(r: &mut impl Read, buf: &mut [u8], timeout: std::time::Duration) -> Result<(), ReadErr> {
-    let deadline = std::time::Instant::now() + timeout;
+/// 阻塞读满一帧；ffmpeg 输出流在进程存活时不会半途返回 0，故无需超时。
+fn read_exact_blocking(r: &mut impl Read, buf: &mut [u8]) -> Result<(), ReadErr> {
     let mut off = 0;
     while off < buf.len() {
-        if std::time::Instant::now() > deadline {
-            return Err(ReadErr::Timeout);
-        }
         match r.read(&mut buf[off..]) {
             Ok(0) => return Err(ReadErr::Eof),
             Ok(n) => off += n,

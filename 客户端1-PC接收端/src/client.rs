@@ -313,6 +313,14 @@ where
             "[hvr-sink] 解码器配置: codec={:?} config_buffer={}B",
             c.codec, c.config_buffer.len()
         );
+        // [HVR fix] config_buffer 含 SPS/PPS（H.264 解码必需的序列/图像参数集）。
+        // 服务端不会在视频 NAL 里重复发 SPS/PPS，必须先把配置帧喂给 ffmpeg，
+        // 否则每帧都报 "non-existing PPS 0 referenced" → 解不出任何 BGRA 帧。
+        if !c.config_buffer.is_empty() {
+            eprintln!("[hvr-sink] 推送 SPS/PPS 配置帧到解码器 ({}B) head={:02X?}",
+                c.config_buffer.len(), &c.config_buffer[..c.config_buffer.len().min(32)]);
+            on_frame(std::time::Duration::ZERO, &c.config_buffer);
+        }
     }
 
     // 6) 流通道协议/端口以服务端 session 为准（ALVR 默认 UDP，wired 才 TCP）
@@ -373,6 +381,13 @@ where
     control.write_all(&views).ok();
 
     // 10) 后台持续读控制通道：DecoderConfig / Restarting 不能一直堆在 TCP 缓冲里
+    // [HVR fix] 服务端只在收到 RequestIdr 时才下发 DecoderConfig(含 SPS/PPS)，且晚于握手。
+    // 用共享槽把 config_buffer 从后台控制线程传给主循环，再喂给解码器。
+    let config_slot: Arc<std::sync::Mutex<Option<Vec<u8>>>> = Arc::new(std::sync::Mutex::new(None));
+    let config_slot_bg = Arc::clone(&config_slot);
+    // 主动请求 IDR，触发服务端尽快下发 SPS/PPS
+    let req_idr = control_encode(&ClientControlPacket::RequestIdr).unwrap();
+    control.write_all(&req_idr).ok();
     let mut ctrl_read = control.try_clone().map_err(|e| format!("克隆控制通道: {e}"))?;
     ctrl_read.set_read_timeout(Some(Duration::from_millis(500))).ok();
     let ctrl_stop = Arc::new(AtomicBool::new(false));
@@ -386,6 +401,9 @@ where
                         "[hvr-sink] 服务端 DecoderConfig: codec={:?} config_buffer={}B",
                         c.codec, c.config_buffer.len()
                     );
+                    if !c.config_buffer.is_empty() {
+                        if let Ok(mut slot) = config_slot_bg.lock() { *slot = Some(c.config_buffer); }
+                    }
                 }
                 Ok(ServerControlPacket::Restarting) => {
                     eprintln!("[hvr-sink] 服务端要求重启串流");
@@ -408,6 +426,7 @@ where
         stop,
         summary,
         cfg.target_fps,
+        config_slot,
     );
     ctrl_stop.store(true, Ordering::Relaxed);
     result
@@ -538,6 +557,7 @@ fn stream_video_and_track<F, P, B>(
     stop: &Arc<AtomicBool>,
     summary: &mut RunSummary,
     target_fps: f32,
+    config_slot: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
 ) -> Result<(), String>
 where
     F: FnMut(Duration, &[u8]) -> bool + Send,
@@ -557,7 +577,18 @@ where
     // 丢包后进入损坏期：丢弃非 IDR 帧，直到下一个 IDR 到达（对齐上游 avoid_video_glitching）
     let mut stream_corrupted = false;
 
+    let mut config_pushed = false;
     while !stop.load(Ordering::Relaxed) {
+        // [HVR fix] 后台控制线程收到 DecoderConfig(SPS/PPS) 后，推给解码器一次
+        if !config_pushed {
+            if let Ok(mut slot) = config_slot.lock() {
+                if let Some(cfgbuf) = slot.take() {
+                    eprintln!("[hvr-sink] 推送服务端 SPS/PPS 到解码器 ({}B)", cfgbuf.len());
+                    on_frame(std::time::Duration::ZERO, &cfgbuf);
+                    config_pushed = true;
+                }
+            }
+        }
         // 收流（带缓冲拼接，处理 TCP 粘包/半包）
         match stream.read(&mut tmp) {
             Ok(0) => return Err("流通道断开".into()),
