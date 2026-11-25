@@ -594,8 +594,28 @@ where
     // 丢包后进入损坏期：丢弃非 IDR 帧，直到下一个 IDR 到达（对齐上游 avoid_video_glitching）
     let mut stream_corrupted = false;
 
+    // [HVR fix] 视频流超时检测：若服务端连着控制通道却迟迟不发视频（会话假死），
+    // 旧逻辑会在 stream.read 超时的 WouldBlock 分支永远空转，客户端再也不会重新发现。
+    // 这里记录最后一个视频包时间，超过阈值主动结束会话触发重连。
+    // 给 15 秒启动宽限期：服务端初始化编码器/等 SteamVR 首帧可能要几秒。
+    const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(15);
+    let mut last_video = Instant::now();
+    let mut warned_stall = false;
+
     let mut config_pushed = false;
     while !stop.load(Ordering::Relaxed) {
+        // 会话建立超过宽限期后，若一直没有任何视频包则判定假死，重连
+        if session_start.elapsed() > VIDEO_STALL_TIMEOUT
+            && summary.frames_received == 0
+            && Instant::now() - last_video > VIDEO_STALL_TIMEOUT {
+            return Err(format!("视频流超时 {}s 无数据，主动重连", VIDEO_STALL_TIMEOUT.as_secs()));
+        }
+        if !warned_stall && session_start.elapsed() > VIDEO_STALL_TIMEOUT / 2
+            && summary.frames_received == 0 {
+            eprintln!("[hvr-sink] 警告：流通道已建但 {}s 无视频包，服务端可能未出帧",
+                (VIDEO_STALL_TIMEOUT / 2).as_secs());
+            warned_stall = true;
+        }
         // [HVR fix] 后台控制线程收到 DecoderConfig(SPS/PPS) 后，推给解码器一次
         if !config_pushed {
             if let Ok(mut slot) = config_slot.lock() {
@@ -629,6 +649,7 @@ where
                     let shard_bytes = &carry[SHARD_PREFIX_SIZE..total];
                     if let Some((sid, packet)) = reasm.push(h.stream_id, h.packet_index, h.shards_count, h.shard_index, shard_bytes) {
                         if sid == STREAM_VIDEO {
+                            last_video = Instant::now();
                             handle_video_packet(&packet, on_frame, summary, &mut stream_corrupted, control);
                         }
                         // AUDIO / HAPTICS / STATISTICS 由渲染端按需扩展，本版先丢弃
