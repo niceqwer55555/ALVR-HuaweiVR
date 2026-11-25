@@ -149,17 +149,19 @@ pub struct RunSummary {
 }
 
 /// 运行客户端主循环（阻塞）。返回统计摘要。
-pub fn run<F, P, B>(
+pub fn run<F, P, B, H>(
     cfg: &ClientConfig,
     mut on_frame: F,
     pose: P,
     battery: B,
+    hand_pose: H,
     stop: Arc<AtomicBool>,
 ) -> RunSummary
 where
     F: FnMut(Duration, &[u8]) -> bool + Send,
     P: Fn() -> ([f32; 4], [f32; 3]) + Send,
     B: Fn() -> (f32, bool) + Send,
+    H: Fn() -> Option<([f32;4], [f32;3], [f32;4], [f32;3])> + Send + Sync,
 {
     let mut summary = RunSummary {
         frames_received: 0,
@@ -170,7 +172,7 @@ where
     };
 
     while !stop.load(Ordering::Relaxed) {
-        match one_session(cfg, &mut on_frame, &pose, &battery, &stop, &mut summary) {
+        match one_session(cfg, &mut on_frame, &pose, &battery, &hand_pose, &stop, &mut summary) {
             Ok(()) => {}
             Err(e) => {
                 status::set_alvr_connected(false);
@@ -217,11 +219,12 @@ fn build_capabilities(cfg: &ClientConfig) -> VideoStreamingCapabilitiesLegacy {
     }
 }
 
-fn one_session<F, P, B>(
+fn one_session<F, P, B, H>(
     cfg: &ClientConfig,
     on_frame: &mut F,
     pose: &P,
     battery: &B,
+    hand_pose: &H,
     stop: &Arc<AtomicBool>,
     summary: &mut RunSummary,
 ) -> Result<(), String>
@@ -229,6 +232,7 @@ where
     F: FnMut(Duration, &[u8]) -> bool + Send,
     P: Fn() -> ([f32; 4], [f32; 3]) + Send,
     B: Fn() -> (f32, bool) + Send,
+    H: Fn() -> Option<([f32;4], [f32;3], [f32;4], [f32;3])> + Send + Sync,
 {
     // 1) 监听控制端口，等 server 连入（上游 ProtoControlSocket::connect_to(Server(listener))）
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, CONTROL_PORT))
@@ -423,6 +427,7 @@ where
         on_frame,
         pose,
         battery,
+        &hand_pose,
         stop,
         summary,
         cfg.target_fps,
@@ -548,12 +553,13 @@ impl Reassembler {
     }
 }
 
-fn stream_video_and_track<F, P, B>(
+fn stream_video_and_track<F, P, B, H>(
     stream: &mut StreamChannel,
     control: &mut TcpStream,
     on_frame: &mut F,
     pose: &P,
     battery: &B,
+    hand_pose: &H,
     stop: &Arc<AtomicBool>,
     summary: &mut RunSummary,
     target_fps: f32,
@@ -563,6 +569,7 @@ where
     F: FnMut(Duration, &[u8]) -> bool + Send,
     P: Fn() -> ([f32; 4], [f32; 3]) + Send,
     B: Fn() -> (f32, bool) + Send,
+    H: Fn() -> Option<([f32;4], [f32;3], [f32;4], [f32;3])> + Send + Sync,
 {
     let mut reasm = Reassembler::new();
     let session_start = Instant::now();
@@ -636,31 +643,31 @@ where
                 pose: Pose { orientation: quat, position: pos },
                 ..Default::default()
             };
-            // [HVR] 手柄默认姿态：服务端严格按 hash id 匹配 head/左右手柄。
-            // 手柄真实 6DoF 由华为私有 SLAM 算（闭源 VR6DOF.dll），接收端拿不到；
-            // 这里用"头显前方握持位"的合理默认值，位置长度 > 0.05m 阈值，
-            // 让服务端判定为 6DoF（不会被 clamp 成 3DoF/埋在地板）。朝向跟随头显，
-            // 左右各偏移 ±0.22m、下方 0.30m、前方 0.35m（近似手臂自然握持位）。
-            let hand_pose = |lateral: f32| {
-                let right = if lateral > 0.0 { [1.0f32,0.0,0.0,0.0] } else { [1.0f32,0.0,0.0,0.0] };
-                // 位置在头显局部坐标：绕头显朝向旋转 (lateral, -0.30, -0.35)
-                let off = [lateral, -0.30f32, -0.35f32];
-                let rotate = |v: [f32;3]| {
-                    let (x,y,z,w) = (quat[0],quat[1],quat[2],quat[3]);
-                    // q * (v,0) * q^-1 的向量旋转
-                    let ix =  w*v[0] + y*v[2] - z*v[1];
-                    let iy =  w*v[1] + z*v[0] - x*v[2];
-                    let iz =  w*v[2] + x*v[1] - y*v[0];
-                    let iw = -x*v[0] - y*v[1] - z*v[2];
-                    [ ix*w + iw*(-x) + iy*(-z) - iz*(-y),
-                      iy*w + iw*(-y) + iz*(-x) - ix*(-z),
-                      iz*w + iw*(-z) + ix*(-y) - iy*(-x) ]
+            // [HVR] 手柄姿态：优先用 slam_bridge 从华为 VR6DOF.dll 读到的真实 6DoF；
+            // 无数据（桥接未启动/未收敛）时回退到"头显前方握持位"默认姿态，
+            // 位置长度 > 0.05m 阈值让服务端判定为 6DoF。
+            let (left_pose, right_pose) = if let Some((lq, lp, rq, rp)) = hand_pose() {
+                (Pose { orientation: lq, position: lp }, Pose { orientation: rq, position: rp })
+            } else {
+                let fallback = |lateral: f32| {
+                    let off = [lateral, -0.30f32, -0.35f32];
+                    let rotate = |v: [f32;3]| {
+                        let (x,y,z,w) = (quat[0],quat[1],quat[2],quat[3]);
+                        let ix =  w*v[0] + y*v[2] - z*v[1];
+                        let iy =  w*v[1] + z*v[0] - x*v[2];
+                        let iz =  w*v[2] + x*v[1] - y*v[0];
+                        let iw = -x*v[0] - y*v[1] - z*v[2];
+                        [ ix*w + iw*(-x) + iy*(-z) - iz*(-y),
+                          iy*w + iw*(-y) + iz*(-x) - ix*(-z),
+                          iz*w + iw*(-z) + ix*(-y) - iy*(-x) ]
+                    };
+                    let p = rotate(off);
+                    Pose { orientation: [1.0,0.0,0.0,0.0], position: [pos[0]+p[0], pos[1]+p[1], pos[2]+p[2]] }
                 };
-                let p = rotate(off);
-                Pose { orientation: right, position: [pos[0]+p[0], pos[1]+p[1], pos[2]+p[2]] }
+                (fallback(-0.22), fallback(0.22))
             };
-            let left_motion = DeviceMotion { pose: hand_pose(-0.22), ..Default::default() };
-            let right_motion = DeviceMotion { pose: hand_pose(0.22), ..Default::default() };
+            let left_motion = DeviceMotion { pose: left_pose, ..Default::default() };
+            let right_motion = DeviceMotion { pose: right_pose, ..Default::default() };
             let track = Tracking {
                 // 用会话开始以来的单调时间，服务端才能做姿态预测；固定 0 会让预测失效
                 target_timestamp: session_start.elapsed(),
@@ -952,12 +959,13 @@ mod tests {
         };
         let pose = || ([0.0f32, 0.0, 0.0, 1.0], [0.0f32, 0.0, 0.0]);
         let battery = || (1.0f32, true);
+        let no_hand = || None;
 
         let mut summary = RunSummary {
             frames_received: 0, idr_frames: 0, bytes_received: 0,
             tracking_sent: 0, reconnects: 0,
         };
-        let result = one_session(&cfg, &mut on_frame, &pose, &battery, &stop, &mut summary);
+        let result = one_session(&cfg, &mut on_frame, &pose, &battery, &no_hand, &stop, &mut summary);
         eprintln!("[hvr-sink] 会话结束: {:?}", result);
         let tracking_bytes = track_rx.recv_timeout(StdDuration::from_secs(3)).unwrap();
 

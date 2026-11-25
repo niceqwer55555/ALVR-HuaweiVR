@@ -16,7 +16,7 @@ mod status;
 use client::{run, ClientConfig, RunSummary};
 use decoder::{DecodeConfig, Decoder};
 use protocol::Fov;
-use render_bridge::{FrameOutput, PoseInput};
+use render_bridge::{FrameOutput, HandPoseInput, PoseInput};
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -168,6 +168,13 @@ fn main() {
         }
     };
 
+    // 手柄6DoF姿态：slam_bridge.exe → UDP 9913（可选；未启动则回退默认姿态）
+    let hand_input = match HandPoseInput::bind() {
+        Ok(h) => { eprintln!("[hvr-sink] 手柄姿态输入已绑定 UDP {}", render_bridge::HAND_POSE_PORT); h }
+        Err(e) => { eprintln!("[hvr-sink] 手柄姿态端口绑定失败({e})，使用默认姿态"); HandPoseInput::dummy() }
+    };
+    let hand_pose = move || hand_input.read();
+
     // 解码配置：分辨率取协商值，立体布局 SBS/TB 决定合成帧尺寸
     let mut dec_cfg = DecodeConfig::default();
     dec_cfg.width = cfg.view_resolution[0];
@@ -207,7 +214,7 @@ fn main() {
     let battery = move || battery_mon.snapshot().hmd_battery();
 
     eprintln!("[hvr-sink] 启动，等待 PC 串流端（同局域网，ALVR Dashboard 运行中）…");
-    let summary: RunSummary = run(&cfg, &mut on_frame, pose, battery, stop);
+    let summary: RunSummary = run(&cfg, &mut on_frame, pose, battery, hand_pose, stop);
     eprintln!("[hvr-sink] 结束统计: {:?}", summary);
     dec.stop();
 }

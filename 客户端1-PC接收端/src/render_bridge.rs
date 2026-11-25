@@ -19,6 +19,9 @@ use std::time::{Duration, Instant};
 
 pub const FRAME_PORT: u16 = 9911;
 pub const POSE_PORT: u16 = 9912;
+/// 手柄6DoF姿态输入端口：slam_bridge.exe → 本进程
+/// 数据 = 2手 × [pos x,y,z + quat w,x,y,z] = 14 × f32 = 56 字节（小端）
+pub const HAND_POSE_PORT: u16 = 9913;
 
 /// 帧输出器：把解码后的 BGRA 帧通过 TCP 发给本地渲染器
 pub struct FrameOutput {
@@ -141,6 +144,74 @@ impl PoseInput {
             ];
             let _ = valid.load(Ordering::Relaxed);
             (q, [0.0, 0.0, 0.0])
+        }
+    }
+}
+
+/// 手柄 6DoF 姿态接收器（来自 slam_bridge.exe，读华为 VR6DOF.dll 的 SLAM 结果）
+/// 返回 (左手 quat,左手 pos,右手 quat,右手 pos)，无数据时 None（让 client 回退默认姿态）
+pub struct HandPoseInput {
+    data: Arc<Vec<AtomicU32>>,   // 14 个 f32 的位模式
+    stamp: Arc<AtomicU32>,       // 最后一次收到数据的 unix 秒（低32位）
+}
+
+impl HandPoseInput {
+    /// 端口占用时的空实现：永远返回 None（client 回退默认姿态）
+    pub fn dummy() -> Self {
+        Self { data: Arc::new((0..14).map(|_| AtomicU32::new(0)).collect()), stamp: Arc::new(AtomicU32::new(0)) }
+    }
+
+    pub fn bind() -> std::io::Result<Self> {
+        let sock = UdpSocket::bind(("127.0.0.1", HAND_POSE_PORT))?;
+        sock.set_read_timeout(Some(Duration::from_millis(20))).ok();
+        let data = Arc::new((0..14).map(|_| AtomicU32::new(0)).collect::<Vec<_>>());
+        let stamp = Arc::new(AtomicU32::new(0));
+        let (data_r, stamp_r) = (Arc::clone(&data), Arc::clone(&stamp));
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            loop {
+                match sock.recv(&mut buf) {
+                    Ok(n) if n >= 56 => {
+                        for i in 0..14 {
+                            let b: [u8;4] = buf[i*4..i*4+4].try_into().unwrap();
+                            data_r[i].store(u32::from_le_bytes(b), Ordering::Relaxed);
+                        }
+                        stamp_r.store(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+                                .as_secs() as u32, Ordering::Relaxed);
+                    }
+                    _ => std::thread::sleep(Duration::from_millis(1)),
+                }
+            }
+        });
+        Ok(Self { data, stamp })
+    }
+
+    /// 返回 Some((Lq,Lp,Rq,Rp))，数据超过3秒未更新则返回 None
+    pub fn read(&self) -> Option<([f32;4],[f32;3],[f32;4],[f32;3])> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as u32;
+        let st = self.stamp.load(Ordering::Relaxed);
+        if st == 0 || now.wrapping_sub(st) > 3 { return None; }
+        let f = |i: usize| f32::from_bits(self.data[i].load(Ordering::Relaxed));
+        // 包布局: hand0 = pos(0..3) quat(3..7), hand1 = pos(7..10) quat(10..14)
+        let q = |i: usize| [f(i+3), f(i+4), f(i+5), f(i+6)];
+        let p = |i: usize| [f(i), f(i+1), f(i+2)];
+        // VR6DOF 的 hand0 常为 0（单手在线），hand1 有数据；按位置 x 符号映射到左右手
+        let (a_q,a_p,b_q,b_p) = (q(0),p(0),q(7),p(7));
+        let a_valid = a_p.iter().any(|v| v.abs() > 1e-4) || a_q[0].abs() > 1e-4;
+        let b_valid = b_p.iter().any(|v| v.abs() > 1e-4) || b_q[0].abs() > 1e-4;
+        // 默认把有数据的手当左手（x<0），另一只当右手；若只有一只在线，另一只回退 None 由 client 处理
+        if a_valid && b_valid {
+            // 按 x 坐标排序：x 更负的是左手
+            if a_p[0] <= b_p[0] { Some((a_q,a_p,b_q,b_p)) } else { Some((b_q,b_p,a_q,a_p)) }
+        } else if a_valid {
+            Some((a_q,a_p,a_q,a_p))  // 仅一只手在线：两手共用（可后续校准）
+        } else if b_valid {
+            Some((b_q,b_p,b_q,b_p))
+        } else {
+            None
         }
     }
 }

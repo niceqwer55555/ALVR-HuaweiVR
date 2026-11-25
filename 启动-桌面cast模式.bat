@@ -27,6 +27,10 @@ echo [2/4] 启动眼镜渲染器（杀SteamVR独占面板）
 start "" "%RD%\HwVRDesktop.exe"
 timeout /t 5 /nobreak >nul
 
+echo [手柄] 启动华为SLAM手柄姿态桥接（真实6DoF）
+start "" /D "%PROD%" "%PROD%\slam_bridge.exe"
+timeout /t 6 /nobreak >nul
+
 echo [3/4] 启动接收核心
 set "FFMPEG=%FFMPEG%"
 start "" /D "%PROD%" "%PROD%\hvr-alvr-win-sink.exe" --config sink_config.json
