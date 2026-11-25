@@ -216,6 +216,13 @@ fn main() {
                 .to_string_lossy()
         );
         println!("cargo:rustc-link-lib=openvr_api");
+        // MSVC 靠 #pragma comment(lib, ...) 自动链接，MinGW 会忽略这些 pragma
+        for lib in [
+            "winmm", "dxgi", "d3d11", "rpcrt4", "psapi", "dbghelp", "ole32", "oleaut32",
+            "user32", "gdi32", "shell32", "advapi32",
+        ] {
+            println!("cargo:rustc-link-lib={lib}");
+        }
     }
 
     if platform_name == "linux" {
