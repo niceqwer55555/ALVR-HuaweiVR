@@ -1108,7 +1108,10 @@ static int RunDesktopMode() {
             static ULONGLONG tCheck = 0;
             static ULONGLONG tStartW = GetTickCount64();
             static int vrHits = 0;
-            if (now - tCheck > 1000) {
+            // [HVR] [general] kill_steamvr=0 时保留 SteamVR（SteamVR场景/VR游戏串流模式），
+            // 默认为 1（桌面cast模式，维持原行为：杀掉抢屏的SteamVR）。
+            static const int s_killVr = (int)GetPrivateProfileIntW(L"general", L"kill_steamvr", 1, DmIniPath().c_str());
+            if (s_killVr && now - tCheck > 1000) {
                 tCheck = now;
                 HANDLE hs = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
                 if (hs != INVALID_HANDLE_VALUE) {
