@@ -28,7 +28,7 @@
     "rate_control_mode": 0,
     "filler_data": false,
     "entropy_coding": 0,
-    "force_sw_encoding": false,
+    "force_sw_encoding": true,
     "sw_thread_count": 0,
     "cast_mode": false,
     "cast_monitor_index": 0,
@@ -87,7 +87,17 @@
     "_encoder_debug": false,
     "_decoder_debug": false
   },
-  "client_connections": {},
+  "client_connections": {
+    "HVR-SINK": {
+      "display_name": "HVR-SINK",
+      "current_ip": null,
+      "manual_ips": [
+        "127.0.0.1"
+      ],
+      "trusted": true,
+      "connection_state": "Disconnected"
+    }
+  },
   "session_settings": {
     "video": {
       "passthrough": {
@@ -264,7 +274,7 @@
         },
         "software": {
           "gui_collapsed": true,
-          "force_software_encoding": false,
+          "force_software_encoding": true,
           "thread_count": 0
         }
       },
@@ -679,12 +689,12 @@
     },
     "connection": {
       "stream_protocol": {
-        "variant": "Udp"
+        "variant": "Tcp"
       },
       "client_discovery": {
         "enabled": true,
         "content": {
-          "auto_trust_clients": false
+          "auto_trust_clients": true
         }
       },
       "wired_client_type": {
