@@ -172,11 +172,21 @@ where
     };
 
     while !stop.load(Ordering::Relaxed) {
+        let mut backoff = Duration::from_secs(1);
         match one_session(cfg, &mut on_frame, &pose, &battery, &hand_pose, &stop, &mut summary) {
             Ok(()) => {}
             Err(e) => {
                 status::set_alvr_connected(false);
                 eprintln!("[hvr-sink] 会话结束: {e}");
+                // [HVR fix] 服务端发 Restarting / 主动断开后，它需要时间重新初始化
+                // 编码器与流通道。若客户端 1 秒就重连，会撞上服务端尚未就绪的窗口，
+                // 表现为双方陷入「连上→立刻断→再连」的反复连接循环。
+                // 对这些「服务端侧重启/断开」的错误退避更久，与服务端节奏对齐。
+                if e.contains("服务端重启") || e.contains("强迫关闭")
+                    || e.contains("远程主机") || e.contains("connection reset")
+                    || e.contains("连接被重置") || e.contains("Broken pipe") {
+                    backoff = Duration::from_secs(5);
+                }
             }
         }
         if stop.load(Ordering::Relaxed) {
@@ -184,7 +194,7 @@ where
             break;
         }
         summary.reconnects += 1;
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(backoff);
     }
     summary
 }
