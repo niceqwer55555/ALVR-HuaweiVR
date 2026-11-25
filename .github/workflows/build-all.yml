@@ -52,7 +52,8 @@ jobs:
           export CXX_x86_64_pc_windows_gnu=x86_64-w64-mingw32-g++-posix
           export AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar
           export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$CC_x86_64_pc_windows_gnu
-          export LIBCLANG_PATH=/lib/x86_64-linux-gnu
+          LIBCLANG="$(find /usr/lib /usr/local/lib -name 'libclang.so*' -print -quit 2>/dev/null || true)"
+          if [ -n "$LIBCLANG" ]; then export LIBCLANG_PATH="$(dirname "$LIBCLANG")"; else export LIBCLANG_PATH=/lib/x86_64-linux-gnu; fi
 
           cargo build --release -p alvr_dashboard -p alvr_launcher -p alvr_server_core \
             --target x86_64-pc-windows-gnu
