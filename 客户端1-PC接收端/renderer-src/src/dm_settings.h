@@ -46,6 +46,7 @@ struct DmSettings {
     // [general]
     int   version;
     int   enabled;              // 桌面模式是否启用（客户端读）
+    int   frameSource;          // 帧源：0=网络串流(SteamVR/ALVR，默认) 1=本地桌面投屏(有线)
     // [display]
     int   monitorIndex;         // 采集源：DM 内部枚举序号（0 = 主屏）
     float distance;             // 米

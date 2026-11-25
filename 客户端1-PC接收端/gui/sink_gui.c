@@ -27,6 +27,8 @@
 #define ID_BTN_CLEAR  2007
 #define ID_TIMER      2008
 #define ID_LEDPANEL   2009
+#define ID_RADIO_VR    2010
+#define ID_RADIO_LOCAL 2011
 #define WM_APPENDLOG  (WM_APP + 1)
 
 /* ---------- 指示灯数据 ---------- */
@@ -53,6 +55,8 @@ static wchar_t g_exeDir[MAX_PATH];
 static wchar_t g_corePath[MAX_PATH];
 static wchar_t g_renderPath[MAX_PATH];
 static wchar_t g_statusPath[MAX_PATH];
+static wchar_t g_iniPath[MAX_PATH];
+static int   g_mode = 0;   /* 0=SteamVR串流(默认) 1=本地桌面投屏(有线) */
 
 /* UTF-8 字节 -> 新分配的宽字符串（调用方 free） */
 static wchar_t *utf8_to_wide(const char *s) {
@@ -301,6 +305,28 @@ static int run_core(LPCWSTR args, int track_handle) {
     return 1;
 }
 
+/* ---------- 按当前模式写 desktop_mode.ini（帧源 + SteamVR 抢占开关） ---------- */
+static void apply_mode_config(void) {
+    /* frame_source: 0=网络串流(SteamVR) 1=本地桌面投屏(有线)
+       kill_steamvr: 串流=0(保留SteamVR产帧) 有线投屏=1(独占眼镜面板) */
+    WritePrivateProfileStringW(L"general", L"frame_source",
+        g_mode == 1 ? L"1" : L"0", g_iniPath);
+    WritePrivateProfileStringW(L"general", L"kill_steamvr",
+        g_mode == 1 ? L"1" : L"0", g_iniPath);
+    append_log(g_mode == 1
+        ? L"[系统] 模式=本地桌面投屏（有线）：frame_source=1, kill_steamvr=1\r\n"
+        : L"[系统] 模式=SteamVR 串流（无线）：frame_source=0, kill_steamvr=0\r\n");
+}
+
+/* ---------- 确保 SteamVR 不抢面板（有线投屏模式） ---------- */
+static void stop_steamvr_if_local(void) {
+    if (g_mode != 1) return;
+    /* 用隐藏窗口方式结束 SteamVR，避免 GUI 程序闪控制台 */
+    ShellExecuteW(NULL, L"open", L"taskkill.exe", L"/F /IM vrserver.exe", NULL, SW_HIDE);
+    ShellExecuteW(NULL, L"open", L"taskkill.exe", L"/F /IM vrmonitor.exe", NULL, SW_HIDE);
+    append_log(L"[系统] 已结束 SteamVR（本地桌面投屏独占眼镜面板）\r\n");
+}
+
 /* ---------- 启动眼镜渲染器（D3D11 SBS，监听 9911 收解码帧） ---------- */
 static void start_renderer(void) {
     if (g_renderPi.hProcess) return; /* 已启动 */
@@ -400,6 +426,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 610, 554, 130, 34,
                         hwnd, (HMENU)ID_BTN_CLEAR, NULL, NULL);
 
+        /* 模式选择：默认 SteamVR 串流 */
+        CreateWindowExW(0, L"Static", L"显示模式：",
+                        WS_CHILD | WS_VISIBLE | SS_LEFT, 12, 600, 90, 24,
+                        hwnd, NULL, NULL, NULL);
+        HWND radioVR = CreateWindowExW(0, L"Button", L"SteamVR 串流（无线，默认）",
+                        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP,
+                        100, 598, 240, 26, hwnd, (HMENU)ID_RADIO_VR, NULL, NULL);
+        HWND radioLocal = CreateWindowExW(0, L"Button", L"本地桌面投屏（有线）",
+                        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_TABSTOP,
+                        348, 598, 220, 26, hwnd, (HMENU)ID_RADIO_LOCAL, NULL, NULL);
+        SendMessageW(radioVR, BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageW(radioLocal, BM_SETCHECK, BST_UNCHECKED, 0);
+        SendMessageW(radioVR, WM_SETFONT, (WPARAM)g_font, TRUE);
+        SendMessageW(radioLocal, WM_SETFONT, (WPARAM)g_font, TRUE);
+
         HWND ctrls[] = {g_stateEdit, g_logEdit, g_btnStart, g_btnStop,
                         g_btnStatus, g_btnSelf, g_btnClear};
         for (int i = 0; i < 7; ++i)
@@ -411,6 +452,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         swprintf(g_corePath, MAX_PATH, L"%lshvr-alvr-win-sink.exe", g_exeDir);
         swprintf(g_renderPath, MAX_PATH, L"%lsrenderer\\HwVRDesktop.exe", g_exeDir);
         swprintf(g_statusPath, MAX_PATH, L"%lsdevice_status.json", g_exeDir);
+        swprintf(g_iniPath, MAX_PATH, L"%lsrenderer\\desktop_mode.ini", g_exeDir);
 
         append_log(L"[系统] HVR VR Glass 串流接收端已就绪\r\n");
         append_log(L"[系统] 上方三个指示灯实时显示头显 / 左手柄 / 右手柄状态\r\n");
@@ -432,13 +474,30 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case ID_RADIO_VR:
+            g_mode = 0;
+            append_log(L"[系统] 已选择：SteamVR 串流（无线）\r\n");
+            return 0;
+        case ID_RADIO_LOCAL:
+            g_mode = 1;
+            append_log(L"[系统] 已选择：本地桌面投屏（有线）\r\n");
+            return 0;
         case ID_BTN_START:
             if (g_running) {
                 append_log(L"[提示] 串流引擎已在运行\r\n");
             } else {
-                append_log(L"[系统] 正在启动串流引擎...\r\n");
-                start_renderer();  /* 先起眼镜渲染器，再起连接核心 */
-                run_core(L"--config sink_config.json", 1);
+                apply_mode_config();
+                if (g_mode == 1) {
+                    /* 有线投屏：杀 SteamVR 独占面板，只起渲染器（它抓本地桌面），不启核心 */
+                    stop_steamvr_if_local();
+                    append_log(L"[系统] 正在启动本地桌面投屏（无需核心引擎）...\r\n");
+                    start_renderer();
+                } else {
+                    /* SteamVR 串流：先起渲染器，再起连接核心 */
+                    append_log(L"[系统] 正在启动 SteamVR 串流引擎...\r\n");
+                    start_renderer();
+                    run_core(L"--config sink_config.json", 1);
+                }
             }
             break;
         case ID_BTN_STOP:
@@ -497,7 +556,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmdLine, int nShow)
     HWND hwnd = CreateWindowExW(0, L"HvrSinkGuiClass",
                     L"HVR VR Glass 串流接收端 —— 低配电脑显示端",
                     WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                    CW_USEDEFAULT, CW_USEDEFAULT, 1000, 640,
+                    CW_USEDEFAULT, CW_USEDEFAULT, 1000, 700,
                     NULL, NULL, hInst, NULL);
     if (!hwnd) {
         MessageBoxW(NULL, L"窗口创建失败", L"错误", MB_ICONERROR);

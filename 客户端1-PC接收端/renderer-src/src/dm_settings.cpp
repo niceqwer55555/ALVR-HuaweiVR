@@ -256,6 +256,7 @@ void DmSettingsDefault(DmSettings* s) {
 
     s->version = 1;
     s->enabled = 1;
+    s->frameSource = 0;          // 默认网络串流
 
     // [display]
     s->monitorIndex = 0;
@@ -441,6 +442,7 @@ bool DmSettingsLoad(DmSettings* s) {
 
     s->version = DmReadInt(L"general", L"version", s->version, ini);
     s->enabled = DmReadInt(L"general", L"enabled", s->enabled, ini);
+    s->frameSource = DmReadInt(L"general", L"frame_source", s->frameSource, ini);
 
     s->monitorIndex = DmReadInt(L"display", L"monitor", s->monitorIndex, ini);
     s->distance = DmReadFloat(L"display", L"distance", s->distance, ini);
@@ -614,6 +616,7 @@ bool DmSettingsSave(const DmSettings* s) {
 
     DmWriteInt(L"general", L"version", s->version, ini);
     DmWriteInt(L"general", L"enabled", s->enabled, ini);
+    DmWriteInt(L"general", L"frame_source", s->frameSource, ini);
 
     DmWriteInt(L"display", L"monitor", s->monitorIndex, ini);
     DmWriteFloat(L"display", L"distance", s->distance, ini);

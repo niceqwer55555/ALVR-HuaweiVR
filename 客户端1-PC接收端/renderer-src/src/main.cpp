@@ -855,11 +855,15 @@ static void RenderFrame(double dt) {
         if (bgMode >= 0)
             g_gfx.DrawBackground(bgMode, g_st.bgBrightness, right, up, fwd, tanX, tanY, pano);
 
-        ID3D11ShaderResourceView* videoSrv = g_net.Srv();
+        // [HVR 双模式] frameSource: 0=网络串流(SBS帧) 1=本地桌面投屏(单幅桌面)
+        bool localDesktop = (g_st.frameSource == 1);
+        ID3D11ShaderResourceView* videoSrv = localDesktop ? g_cap.srv : g_net.Srv();
         if (!g_screenHidden && g_st.opacity > 0.001f && videoSrv) {
             float u0 = 0, u1 = 1, v0 = 0, v1 = 1;
             bool rightEye = (e == 1) ^ (g_st.swapEyes != 0);
-            switch (g_st.sbsMode) {
+            // 本地桌面投屏：两眼显示同一幅完整桌面；网络串流才按 sbsMode 拆左右眼
+            int effSbs = localDesktop ? 0 : g_st.sbsMode;
+            switch (effSbs) {
             case 0: break;
             case 1:
                 if (rightEye) { u0 = 0.5f; u1 = 1.0f; } else { u0 = 0.0f; u1 = 0.5f; }
@@ -871,7 +875,7 @@ static void RenderFrame(double dt) {
                 if (rightEye) { v0 = 0.5f; v1 = 1.0f; } else { v0 = 0.0f; v1 = 0.5f; }
                 break;
             }
-            if (g_st.sbsMode != 0 && g_st.parallax != 0.0f) {
+            if (effSbs != 0 && g_st.parallax != 0.0f) {
                 float shift = g_st.parallax * (rightEye ? -1.0f : 1.0f);
                 u0 += shift; u1 += shift;
             }
@@ -1326,7 +1330,12 @@ static int RunDesktopMode() {
             g_headValid = false;
         }
 
-        if (g_net.Acquire()) g_capFramesStat++;
+        // [HVR 双模式] 按帧源采集：本地桌面需持续 Acquire 桌面纹理
+        if (g_st.frameSource == 1) {
+            if (g_cap.started && g_cap.Acquire()) g_capFramesStat++;
+        } else {
+            if (g_net.Acquire()) g_capFramesStat++;
+        }
         g_cap.UpdateCursor(g_gfx.dev);
         SendHeadPose();
 
