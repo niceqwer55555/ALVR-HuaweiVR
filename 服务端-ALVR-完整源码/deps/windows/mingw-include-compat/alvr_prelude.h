@@ -7,6 +7,7 @@
 #include <atomic>
 #include <share.h>
 #include <stdio.h>
+#include <timeapi.h>
 #ifndef vscwprintf
 #define vscwprintf _vscwprintf
 #endif
