@@ -1,0 +1,45 @@
+release:
+  name: 发布到 GitHub Release2
+  needs: [windows-server, android-generic, android-huawei]
+  runs-on: ubuntu-24.04
+  steps:
+    - uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+        merge-multiple: true
+
+    - name: 计算发布 Tag（时间戳）
+      id: tag
+      run: |
+        if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+          echo "TAG=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "PRERELEASE=false" >> "$GITHUB_OUTPUT"
+          echo "MAKE=false" >> "$GITHUB_OUTPUT"
+        else
+          TAG="v$(date -u +'%Y.%m.%d-%H%M')"
+          echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "PRERELEASE=true" >> "$GITHUB_OUTPUT"
+          echo "MAKE=true" >> "$GITHUB_OUTPUT"
+        fi
+        echo "Generated tag candidate: $(cat "$GITHUB_OUTPUT")"
+
+    - name: 创建并推送时间戳 Tag
+      if: steps.tag.outputs.MAKE == 'true'
+      run: |
+        git config user.name  "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git tag "${{ steps.tag.outputs.TAG }}"
+        git push origin "${{ steps.tag.outputs.TAG }}"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.tag.outputs.TAG }}
+        name: ${{ steps.tag.outputs.TAG }}
+        prerelease: ${{ steps.tag.outputs.PRERELEASE }}
+        files: |
+          artifacts/ALVR-HuaweiVR-Windows.zip
+          artifacts/ALVR-HuaweiVR-Windows.zip.sha256
+          artifacts/GenericALVR-arm64.apk
+          artifacts/HuaweiVRGlass-armv7.apk
