@@ -174,15 +174,19 @@ void CEncoder::Run() {
         if (m_desktopCapture) {
             const auto started = std::chrono::steady_clock::now();
 
-            if (RenderCastFrame()) {
-                if (m_FrameRender->GetTexture()) {
-                    m_videoEncoder->Transmit(
-                        m_FrameRender->GetTexture().Get(),
-                        m_presentationTime,
-                        m_targetTimestampNs,
-                        m_scheduler.CheckIDRInsertion()
-                    );
-                }
+            // [HVR cast fix] 直接把桌面 canvas 左眼纹理送编码器，绕过 RenderFrame()。
+            // RenderFrame() 用 compositor 共享的 D3D immediate context 做 OMSetRenderTargets，
+            // 在 cast 线程会与 SteamVR compositor 争用 context 而死锁。
+            ID3D11Texture2D* directTex = nullptr;
+            bool castFrameOk = m_desktopCapture->AcquireFrame(
+                                   Settings::Instance().m_castScreenSize,
+                                   (int32_t)Settings::Instance().m_castStereoSeparationPx)
+                && m_desktopCapture->GetCanvas(0, &directTex);
+            if (castFrameOk && directTex) {
+                uint64_t nowNs = GetTimestampUs() * 1000;
+                m_videoEncoder->Transmit(
+                    directTex, nowNs, nowNs, m_scheduler.CheckIDRInsertion()
+                );
             }
 
             m_encodeFinished.Set();

@@ -1,4 +1,5 @@
 #include "OvrDirectModeComponent.h"
+#include "alvr_server/Settings.h"
 
 OvrDirectModeComponent::OvrDirectModeComponent(
     std::shared_ptr<CD3DRender> pD3DRender, std::shared_ptr<PoseHistory> poseHistory
@@ -198,6 +199,16 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
 /** Submits queued layers for display. */
 void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     Debug("OvrDirectModeComponent::Present");
+
+    // [HVR cast fix] cast 模式下画面完全由 CEncoder 的独立线程抓桌面产生，
+    // compositor 的 SubmitLayer/CopyTexture 不再需要。若继续用同一 D3D immediate
+    // context 做 CopyTexture，会和 cast 编码线程争用 context 并在 ~40s 后拖垮
+    // vrcompositor。这里跳过所有 D3D 操作与编码器信号量，只维持 SteamVR 会话。
+    if (Settings::Instance().m_castMode) {
+        ReportPresent(m_targetTimestampNs, 0);
+        ReportComposed(m_targetTimestampNs, 0);
+        return;
+    }
 
     m_presentMutex.lock();
 
