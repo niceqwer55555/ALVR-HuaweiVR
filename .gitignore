@@ -46,3 +46,4 @@ dist/
 产物/客户端-PC/sink_live.log
 产物/客户端-PC/sink_err_live.log
 产物/客户端-PC/sink_out_live.log
+产物/客户端-PC/ffmpeg_stderr.log

@@ -71,11 +71,22 @@ impl Decoder {
     where
         F: FnMut(&[u8], u32, u32) + Send + 'static,
     {
-        let mut child = Command::new(&cfg.ffmpeg)
-            .args(cfg.ffmpeg_args())
+        // [HVR fix] ffmpeg stderr 绝不能用 Stdio::piped() 却不读取：
+        // ffmpeg 一报错（SPS/PPS 不匹配、分辨率不符等）就往 stderr 写，
+        // 管道缓冲 (~64KB) 写满后 ffmpeg 阻塞，停止向 stdout 输出 BGRA，
+        // 于是渲染器永远等不到首帧。改为重定向到文件，永不阻塞。
+        let err_file = std::fs::File::create("ffmpeg_stderr.log")
+            .ok();
+        let mut cmd = Command::new(&cfg.ffmpeg);
+        cmd.args(cfg.ffmpeg_args())
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::piped());
+        if err_file.is_some() {
+            cmd.stderr(Stdio::from(err_file.unwrap()));
+        } else {
+            cmd.stderr(Stdio::null());
+        }
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("启动 FFmpeg 失败（请把 ffmpeg.exe 放到同目录或 PATH）: {e}"))?;
 
@@ -139,10 +150,21 @@ fn decoder_thread<F>(
             0x00,0x00,0x00,0x01,0x68,0xce,0x0f,0xc8,
         ];
         if stdin.write_all(DEFAULT_SPSPPS).is_ok() { let _ = stdin.flush(); }
+        let mut nal_count: u64 = 0;
+        let mut nal_bytes: u64 = 0;
         while !stop_w.load(Ordering::Relaxed) {
             match rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(nal) => {
-                    if stdin.write_all(&nal).is_err() { break; }
+                    nal_count += 1;
+                    nal_bytes += nal.len() as u64;
+                    if nal_count == 1 || nal_count % 300 == 0 {
+                        eprintln!("[decoder] 已送 ffmpeg {nal_count} 个NAL / {nal_bytes} 字节 (最新{}B, head={:02X?})",
+                            nal.len(), &nal[..nal.len().min(8)]);
+                    }
+                    if stdin.write_all(&nal).is_err() {
+                        eprintln!("[decoder] ffmpeg stdin 写入失败，解码器退出");
+                        break;
+                    }
                     let _ = stdin.flush();
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
@@ -155,10 +177,21 @@ fn decoder_thread<F>(
     // [HVR fix] 单帧 BGRA 可达 ~19MB，100ms 内读不完；超时会丢弃已读部分导致永远组不出帧。
     // 改为：单次 read 阻塞读取（不设短超时），只在 ffmpeg 退出(Eof)时结束。
     let mut frame = vec![0u8; frame_bytes];
+    let mut frame_count: u64 = 0;
+    eprintln!("[decoder] 读帧线程就绪, 单帧={}x{}x4={}B", w, h, frame_bytes);
     while !stop.load(Ordering::Relaxed) {
         match read_exact_blocking(&mut stdout, &mut frame) {
-            Ok(()) => on_bgra(&frame, w, h),
-            Err(ReadErr::Eof) => break,
+            Ok(()) => {
+                frame_count += 1;
+                if frame_count == 1 || frame_count % 100 == 0 {
+                    eprintln!("[decoder] 已解出 {frame_count} 帧 BGRA");
+                }
+                on_bgra(&frame, w, h);
+            }
+            Err(ReadErr::Eof) => {
+                eprintln!("[decoder] ffmpeg stdout EOF, 共解出 {frame_count} 帧");
+                break;
+            }
         }
     }
     let _ = writer.join();

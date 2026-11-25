@@ -752,6 +752,10 @@ fn handle_video_packet<F>(
     let nal = &packet[cursor.position() as usize..];
     summary.frames_received += 1;
     summary.bytes_received += nal.len() as u64;
+    if summary.frames_received == 1 || summary.frames_received % 300 == 0 {
+        eprintln!("[hvr-sink] 视频包 #{} IDR={} nal={}B 累计={}B",
+            summary.frames_received, header.is_idr, nal.len(), summary.bytes_received);
+    }
 
     if header.is_idr {
         // IDR 是完整的参考帧：结束损坏期
