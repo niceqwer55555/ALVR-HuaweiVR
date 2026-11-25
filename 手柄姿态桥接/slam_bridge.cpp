@@ -92,17 +92,23 @@ int main() {
     fprintf(stderr, "[slam_bridge] base=0x%llx poseGlobal=0x%llx\n",
             (unsigned long long)base, (unsigned long long)poseGlobal);
 
-    // UDP socket
+    // UDP sockets: 9913=手柄姿态, 9912=头显姿态(供sink回传server驱动头姿)
     WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
     SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     sockaddr_in addr; memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET; addr.sin_port = htons(9913);
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    SOCKET hsock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in haddr; memset(&haddr, 0, sizeof(haddr));
+    haddr.sin_family = AF_INET; haddr.sin_port = htons(9912);
+    haddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    const uint8_t* headPose = (const uint8_t*)(base + 0xee6018); // SLAM 头姿 quat(xyzw)+pos
 
     uint8_t outBuf[0x118 * 2];
     float pkt[14]; // 2手 × (3 pos + 4 quat)
     int sent = 0;
-    fprintf(stderr, "[slam_bridge] 开始推送 UDP 127.0.0.1:9913 (56B/包)\n");
+    fprintf(stderr, "[slam_bridge] 开始推送 UDP 9913(手柄 56B) + 9912(头姿 28B)\n");
     while (!g_stop) {
         gti(obj, outBuf);
         for (int hand = 0; hand < 2; ++hand) {
@@ -115,13 +121,23 @@ int main() {
             pkt[hand*7+3]=qw; pkt[hand*7+4]=qx; pkt[hand*7+5]=qy; pkt[hand*7+6]=qz;
         }
         sendto(sock, (const char*)pkt, sizeof(pkt), 0, (sockaddr*)&addr, sizeof(addr));
+
+        // [HVR fix] 头显姿态同样来自 VR6DOF 的 SLAM，发到 9912 供 sink 回传服务端，
+        // 解决"头部移动画面不重新渲染"——旧的 9912 数据来自渲染器 IMU(Hmd.dll)，
+        // 在 IMU 无效时恒为单位四元数，服务端拿不到头姿就不会重新渲染。
+        float headPkt[7];
+        memcpy(headPkt, headPose, sizeof(headPkt)); // [x,y,z,w, px,py,pz]
+        sendto(hsock, (const char*)headPkt, sizeof(headPkt), 0, (sockaddr*)&haddr, sizeof(haddr));
+
         if (++sent % 300 == 0) {
-            fprintf(stderr, "[slam_bridge] 已推送 %d 包  H0 p=(%.3f,%.3f,%.3f) H1 p=(%.3f,%.3f,%.3f)\n",
-                    sent, pkt[0],pkt[1],pkt[2], pkt[7],pkt[8],pkt[9]);
+            fprintf(stderr, "[slam_bridge] 已推送 %d 包  H0 p=(%.3f,%.3f,%.3f) H1 p=(%.3f,%.3f,%.3f)  HEAD q=(%.3f,%.3f,%.3f,%.3f) p=(%.3f,%.3f,%.3f)\n",
+                    sent, pkt[0],pkt[1],pkt[2], pkt[7],pkt[8],pkt[9],
+                    headPkt[0],headPkt[1],headPkt[2],headPkt[3], headPkt[4],headPkt[5],headPkt[6]);
+            fflush(stderr);
         }
         Sleep(16); // ~60fps
     }
-    closesocket(sock); WSACleanup();
+    closesocket(sock); closesocket(hsock); WSACleanup();
     // DeInit 通常不调（可能挂起），直接退出进程让OS回收
     return 0;
 }

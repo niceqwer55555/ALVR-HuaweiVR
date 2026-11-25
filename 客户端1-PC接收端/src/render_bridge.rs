@@ -117,18 +117,26 @@ impl PoseInput {
             let mut buf = [0u8; 32];
             loop {
                 match sock.recv(&mut buf) {
-                    Ok(n) if n >= 16 => {
+                    // [HVR fix] 只接受 28B 的 SLAM 头姿包(quat xyzw + pos xyz)。
+                    // 渲染器 Hmd.dll IMU 也往 9912 发 16B 包，但在 IMU 无效时
+                    // 恒为单位四元数，会覆盖真实的 SLAM 头姿导致头部不跟随。
+                    Ok(n) if n >= 28 => {
                         let q = [
                             f32::from_le_bytes(buf[0..4].try_into().unwrap()),
                             f32::from_le_bytes(buf[4..8].try_into().unwrap()),
                             f32::from_le_bytes(buf[8..12].try_into().unwrap()),
                             f32::from_le_bytes(buf[12..16].try_into().unwrap()),
                         ];
-                        qx_r.store(q[0].to_bits(), Ordering::Relaxed);
-                        qy_r.store(q[1].to_bits(), Ordering::Relaxed);
-                        qz_r.store(q[2].to_bits(), Ordering::Relaxed);
-                        qw_r.store(q[3].to_bits(), Ordering::Relaxed);
-                        valid_r.store(1, Ordering::Relaxed);
+                        // 全零/单位四元数视为无效，不采信
+                        let is_identity = q[0].abs() < 1e-6 && q[1].abs() < 1e-6
+                            && q[2].abs() < 1e-6 && (q[3] - 1.0).abs() < 1e-6;
+                        if !is_identity {
+                            qx_r.store(q[0].to_bits(), Ordering::Relaxed);
+                            qy_r.store(q[1].to_bits(), Ordering::Relaxed);
+                            qz_r.store(q[2].to_bits(), Ordering::Relaxed);
+                            qw_r.store(q[3].to_bits(), Ordering::Relaxed);
+                            valid_r.store(1, Ordering::Relaxed);
+                        }
                     }
                     _ => std::thread::sleep(Duration::from_millis(1)),
                 }
@@ -241,6 +249,7 @@ mod tests {
         let q = [0.1f32, 0.2, 0.3, 0.9];
         let mut pkt = Vec::new();
         for v in q { pkt.extend_from_slice(&v.to_le_bytes()); }
+        for v in [0.0f32, 0.0, 0.0] { pkt.extend_from_slice(&v.to_le_bytes()); } // 28B SLAM包
         sender.send_to(&pkt, ("127.0.0.1", POSE_PORT)).unwrap();
         let pose = input.start();
         std::thread::sleep(Duration::from_millis(80));
