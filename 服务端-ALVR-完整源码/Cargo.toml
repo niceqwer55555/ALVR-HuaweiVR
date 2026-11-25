@@ -1,28 +1,7 @@
 [workspace]
 resolver = "2"
-members = [
-    "alvr/adb",
-    "alvr/audio",
-    "alvr/common",
-    "alvr/dashboard",
-    "alvr/events",
-    "alvr/filesystem",
-    "alvr/graphics",
-    "alvr/gui_common",
-    "alvr/launcher",
-    "alvr/packets",
-    "alvr/server_core",
-    "alvr/server_io",
-    "alvr/server_openvr",
-    "alvr/session",
-    "alvr/sockets",
-    "alvr/system_info",
-    "alvr/vrcompositor_wrapper",
-    "alvr/vulkan_layer",
-    "alvr/xtask",
-    "alvr/client_openxr",
-]
-exclude = []
+members = ["alvr/*"]
+exclude = ["deps/openxrs-huawei/openxr", "deps/openxrs-huawei/sys"]
 
 [workspace.package]
 version = "20.14.1"

@@ -1,8 +1,7 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Release',
-    [string]$ToolsRoot,
     [switch]$ResetConfiguration
 )
 
@@ -10,13 +9,30 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $projectRoot = (Resolve-Path (Join-Path $repoRoot '..')).Path
+$vsDevCmd = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat'
+$libclangCandidates = @(
+    'C:\Program Files\LLVM\bin',
+    'C:\Program Files\Autodesk\3ds Max 2024',
+    'C:\Program Files\Autodesk\Maya2023\bin'
+)
+$libclangPath = $libclangCandidates |
+    Where-Object { Test-Path -LiteralPath (Join-Path $_ 'libclang.dll') -PathType Leaf } |
+    Select-Object -First 1
 
-# 工具链位置统一由 toolchain-env.ps1 运行时探测（默认根目录 D:\Tools）。
-# 这里不再调用 VsDevCmd.bat —— 它会调用 reg.exe，在构建沙箱里被拦截。
-. (Join-Path $PSScriptRoot 'toolchain-env.ps1')
-$tc = Get-VrToolchain -ToolsRoot $ToolsRoot -Validate
-$tc.Apply()
-Write-Host ($tc.Summary())
+if (-not (Test-Path -LiteralPath $vsDevCmd -PathType Leaf)) {
+    throw "找不到 Visual Studio 开发环境：$vsDevCmd"
+}
+if ([string]::IsNullOrWhiteSpace($libclangPath)) {
+    throw "找不到 libclang.dll；已检查：$($libclangCandidates -join '、')"
+}
+
+$vsEnvironment = & $env:ComSpec /d /s /c "`"$vsDevCmd`" -no_logo -arch=x64 -host_arch=x64 && set"
+foreach ($line in $vsEnvironment) {
+    if ($line -match '^([^=]+)=(.*)$') {
+        [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
+    }
+}
+$env:LIBCLANG_PATH = $libclangPath
 
 Push-Location $repoRoot
 try {
@@ -24,23 +40,10 @@ try {
     if ($Configuration -eq 'Release') {
         $buildArguments += '--release'
     }
-    # GPL: bundle FFmpeg so the x264 software encoder is available. This machine (Steam Deck
-    # Windows, AMD Van Gogh) has no working hardware encoder, without it the streamer cannot
-    # start any encoder at all.
-    $buildArguments += '--gpl'
     if (-not $ResetConfiguration) {
         $buildArguments += '--keep-config'
     }
-    # cargo 把进度信息写进 stderr，在 $ErrorActionPreference='Stop' 下会导致构建被中断
-    $previousErrorAction = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    $PSNativeCommandUseErrorActionPreference = $false
-    & $tc.CargoExe @buildArguments 2>&1 | Tee-Object -FilePath (Join-Path $repoRoot 'build\windows-build.log')
-    $cargoExit = $LASTEXITCODE
-    $ErrorActionPreference = $previousErrorAction
-    if ($cargoExit -ne 0) {
-        throw "cargo xtask build-streamer 失败，退出码：$cargoExit"
-    }
+    cargo @buildArguments
 
     $streamerDirectory = Join-Path $repoRoot 'build\alvr_streamer_windows'
     if (-not (Test-Path -LiteralPath $streamerDirectory -PathType Container)) {

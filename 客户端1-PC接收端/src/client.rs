@@ -614,24 +614,24 @@ where
 
     // [HVR fix] 视频流超时检测：若服务端连着控制通道却迟迟不发视频（会话假死），
     // 旧逻辑会在 stream.read 超时的 WouldBlock 分支永远空转，客户端再也不会重新发现。
-    // 这里记录最后一个视频包时间，超过阈值主动结束会话触发重连。
-    // 给 15 秒启动宽限期：服务端初始化编码器/等 SteamVR 首帧可能要几秒。
-    const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(15);
+    // 关键：判定必须看"距最后一个视频包的时间"，不能只看 frames_received==0——
+    // 否则会话中途断开（收过视频后再无数据）就永远检测不到，只能靠人工重启。
+    // 给 12 秒启动宽限期：服务端初始化编码器/等 SteamVR 首帧可能要几秒。
+    const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(12);
     let mut last_video = Instant::now();
     let mut warned_stall = false;
 
     let mut config_pushed = false;
     while !stop.load(Ordering::Relaxed) {
-        // 会话建立超过宽限期后，若一直没有任何视频包则判定假死，重连
+        // 距最后视频包超过阈值（无论本次会话是否收到过视频）即判定假死，主动重连
         if session_start.elapsed() > VIDEO_STALL_TIMEOUT
-            && summary.frames_received == 0
             && Instant::now() - last_video > VIDEO_STALL_TIMEOUT {
-            return Err(format!("视频流超时 {}s 无数据，主动重连", VIDEO_STALL_TIMEOUT.as_secs()));
+            return Err(format!("视频流中断 {}s 无新包，主动重连", VIDEO_STALL_TIMEOUT.as_secs()));
         }
-        if !warned_stall && session_start.elapsed() > VIDEO_STALL_TIMEOUT / 2
-            && summary.frames_received == 0 {
-            eprintln!("[hvr-sink] 警告：流通道已建但 {}s 无视频包，服务端可能未出帧",
-                (VIDEO_STALL_TIMEOUT / 2).as_secs());
+        if !warned_stall && session_start.elapsed() > VIDEO_STALL_TIMEOUT
+            && Instant::now() - last_video > VIDEO_STALL_TIMEOUT / 2 {
+            eprintln!("[hvr-sink] 警告：已 {}s 未收到新视频包，服务端可能停止出帧",
+                (Instant::now() - last_video).as_secs());
             warned_stall = true;
         }
         // [HVR fix] 后台控制线程收到 DecoderConfig(SPS/PPS) 后，推给解码器一次

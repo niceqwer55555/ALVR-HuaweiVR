@@ -9,7 +9,7 @@ use alvr_client_core::{
 use alvr_common::{
     anyhow::Result,
     error,
-    glam::{UVec2, Vec2, Vec3},
+    glam::{UVec2, Vec2},
     parking_lot::RwLock,
     Pose, RelaxedAtomic, ViewParams, HAND_LEFT_ID, HAND_RIGHT_ID, HEAD_ID,
 };
@@ -22,7 +22,7 @@ use alvr_graphics::{
 use alvr_packets::{FaceData, RealTimeConfig, StreamConfig};
 use alvr_session::{
     ClientsideFoveationConfig, ClientsideFoveationMode, ClientsidePostProcessingConfig, CodecType,
-    FoveatedEncodingConfig, MediacodecProperty, PassthroughMode, ThreeDofConfig, UpscalingConfig,
+    FoveatedEncodingConfig, MediacodecProperty, PassthroughMode, UpscalingConfig,
 };
 use alvr_system_info::Platform;
 use openxr as xr;
@@ -53,11 +53,6 @@ pub struct ParsedStreamConfig {
     pub buffering_history_weight: f32,
     pub decoder_options: Vec<(String, MediacodecProperty)>,
     pub interaction_sources: InteractionSourcesConfig,
-    // Huawei VR Glass can run either in 6DoF (tracking kit connected) or in 3DoF (glasses IMU
-    // only). The picture reaching the client does not change, only the amount of tracking data we
-    // are allowed to believe in. In "Auto" mode only the server clamps the head pose: it receives
-    // the controller poses from this client and can apply the clamp after recentering.
-    pub three_dof: Option<ThreeDofConfig>,
 }
 
 impl ParsedStreamConfig {
@@ -92,12 +87,6 @@ impl ParsedStreamConfig {
             buffering_history_weight: config.settings.video.buffering_history_weight,
             decoder_options: config.settings.video.mediacodec_extra_options.clone(),
             interaction_sources: InteractionSourcesConfig::new(config),
-            three_dof: config
-                .settings
-                .headset
-                .three_dof
-                .forced_config()
-                .cloned(),
         }
     }
 }
@@ -150,14 +139,6 @@ impl StreamContext {
             .select_sources(&config.interaction_sources);
 
         let xr_exts = xr_session.instance().exts();
-
-        // One-shot trace: if the stream never renders, this tells us how far construction got.
-        if platform.is_huawei() {
-            alvr_common::info!(
-                "[HVR-DIAG] StreamContext::new: begin, view_resolution={:?}",
-                config.view_resolution
-            );
-        }
 
         if xr_exts.fb_display_refresh_rate.is_some() {
             xr_session
@@ -230,19 +211,13 @@ impl StreamContext {
         let swapchains = [left_swapchain, right_swapchain];
         let swapchain_textures = [left_textures, right_textures];
 
-        if platform.is_huawei() {
-            alvr_common::info!(
-                "[HVR-DIAG] StreamContext::new: swapchains ready (target={target_view_resolution:?}, format={format:?})"
-            );
-        }
-
         #[cfg(target_os = "android")]
         let renderer = if platform.is_huawei() {
+            let _ = swapchain_textures;
             StreamRendererBackend::Huawei(HuaweiStreamRenderer::new(
                 gfx_ctx,
                 target_view_resolution,
                 config.use_full_range && !config.enable_hdr,
-                swapchain_textures.clone(),
             ))
         } else {
             StreamRendererBackend::Standard(StreamRenderer::new(
@@ -278,10 +253,6 @@ impl StreamContext {
             config.encoding_gamma,
             config.upscaling.clone(),
         ));
-
-        if platform.is_huawei() {
-            alvr_common::info!("[HVR-DIAG] StreamContext::new: renderer ready");
-        }
 
         core_ctx.send_active_interaction_profile(
             *HAND_LEFT_ID,
@@ -324,10 +295,6 @@ impl StreamContext {
         };
 
         this.update_reference_space();
-
-        if platform.is_huawei() {
-            alvr_common::info!("[HVR-DIAG] StreamContext::new: done");
-        }
 
         this
     }
@@ -373,7 +340,6 @@ impl StreamContext {
             let stage_reference_space = Arc::clone(&self.stage_reference_space);
             let view_reference_space = Arc::clone(&self.view_reference_space);
             let refresh_rate = self.config.refresh_rate_hint;
-            let three_dof_config = self.config.three_dof.clone();
             let running = Arc::clone(&self.input_thread_running);
             move || {
                 stream_input_loop(
@@ -383,7 +349,6 @@ impl StreamContext {
                     &stage_reference_space,
                     &view_reference_space,
                     refresh_rate,
-                    three_dof_config,
                     running,
                 )
             }
@@ -424,12 +389,7 @@ impl StreamContext {
             // slots leave one retained frame and two slots for acquiring/discarding stale frames.
             image_reader_max_images: if use_hisi_decoder { 3 } else { 10 },
             prefer_latest_frame: false,
-            // [HVR-FIX] retain_last_frame=true for the VR Glass client: the XrShim
-            // swapchain renderer needs the decoder to actively hand over the newest
-            // frame (pop_back). With false, the in_use-based queue stalls and every
-            // decoded frame overflows -> the eye texture stays a flat clear color.
-            // P30 (Huawei platform) already used true and streams real frames.
-            retain_last_frame: true,
+            retain_last_frame: self.platform.is_huawei(),
             render_output_immediately: use_hisi_decoder,
             configured_frame_size,
             options: self.config.decoder_options.clone(),
@@ -480,7 +440,6 @@ impl StreamContext {
                 self.platform,
                 Some(vsync_time),
                 state,
-                self.config.three_dof.as_ref(),
             )
             .ok();
         }
@@ -592,16 +551,26 @@ impl StreamContext {
             StreamRendererBackend::Huawei(renderer) => {
                 for eye in 0..2 {
                     if eye == 0 && self.huawei_swapchain_trace.get() & 0x01 == 0 {
-                        alvr_common::info!(
-                            "[HVR-DIAG] Huawei stream: drawing straight into the HVR surface, no swapchain"
-                        );
+                        alvr_common::info!("[HVR-DIAG] Huawei stream swapchain: before acquire");
                         self.huawei_swapchain_trace
                             .set(self.huawei_swapchain_trace.get() | 0x01);
                     }
-                    // No OpenXR swapchain on this platform: it has no working xrBeginFrame, so
-                    // xrAcquireSwapchainImage is rejected and the enumerated image handles are
-                    // zero. The renderer writes into the HVR surface the runtime handed us.
+                    self.swapchains[eye].acquire_image().unwrap();
+                    if eye == 0 && self.huawei_swapchain_trace.get() & 0x02 == 0 {
+                        alvr_common::info!("[HVR-DIAG] Huawei stream swapchain: after acquire");
+                        self.huawei_swapchain_trace
+                            .set(self.huawei_swapchain_trace.get() | 0x02);
+                    }
+                    self.swapchains[eye]
+                        .wait_image(xr::Duration::INFINITE)
+                        .unwrap();
+                    if eye == 0 && self.huawei_swapchain_trace.get() & 0x04 == 0 {
+                        alvr_common::info!("[HVR-DIAG] Huawei stream swapchain: after wait");
+                        self.huawei_swapchain_trace
+                            .set(self.huawei_swapchain_trace.get() | 0x04);
+                    }
                     unsafe { renderer.render_view(buffer_ptr, eye) };
+                    self.swapchains[eye].release_image().unwrap();
                 }
             }
         }
@@ -690,7 +659,6 @@ fn poll_stream_inputs(
     platform: Platform,
     now_override: Option<Duration>,
     state: &mut StreamInputState,
-    three_dof_config: Option<&ThreeDofConfig>,
 ) -> Result<(), ()> {
     let int_ctx = &*interaction_ctx.read();
     if let Err(e) = xr_session.sync_actions(&[(&int_ctx.action_set).into()]) {
@@ -712,7 +680,7 @@ fn poll_stream_inputs(
 
     let target_time = now + core_ctx.get_total_prediction_offset();
 
-    let Some((mut head_motion, local_views)) = interaction::get_head_data(
+    let Some((head_motion, local_views)) = interaction::get_head_data(
         xr_session,
         platform,
         stage_reference_space,
@@ -724,19 +692,6 @@ fn poll_stream_inputs(
     ) else {
         return Ok(());
     };
-
-    // Huawei glasses are either tracked by the 6DoF kit or by their own IMU (3DoF). Even when the
-    // runtime keeps reporting a position, ignore it and keep the rotation only, otherwise the
-    // picture drifts or shakes on devices without positional tracking.
-    if let Some(three_dof) = three_dof_config {
-        let mut height = three_dof.eye_height_m;
-        if three_dof.prefer_runtime_height && head_motion.pose.position.y > 0.2 {
-            height = head_motion.pose.position.y;
-        }
-
-        head_motion.pose.position = Vec3::new(0.0, height, 0.0);
-        head_motion.linear_velocity = Vec3::ZERO;
-    }
 
     if let Some(views) = local_views {
         if platform.is_huawei() {
@@ -847,7 +802,6 @@ fn stream_input_loop(
     stage_reference_space: &xr::Space,
     view_reference_space: &xr::Space,
     refresh_rate: f32,
-    three_dof_config: Option<ThreeDofConfig>,
     running: Arc<RelaxedAtomic>,
 ) {
     let platform = alvr_system_info::platform();
@@ -865,7 +819,6 @@ fn stream_input_loop(
             platform,
             None,
             &mut state,
-            three_dof_config.as_ref(),
         )
         .is_err()
         {

@@ -1,16 +1,15 @@
 use std::{env, path::PathBuf};
 
-fn get_ffmpeg_path(platform_name: &str) -> PathBuf {
-    // `cfg!(target_os = ...)` is evaluated for the host when the build script
-    // itself is compiled. Cross-compiling a Windows driver from Linux must use
-    // the target OS reported by Cargo instead, otherwise it looks for
-    // deps/linux/ffmpeg.
-    let is_linux = platform_name == "linux";
+fn get_ffmpeg_path() -> PathBuf {
     let ffmpeg_path = alvr_filesystem::deps_dir()
-        .join(if is_linux { "linux" } else { "windows" })
+        .join(if cfg!(target_os = "linux") {
+            "linux"
+        } else {
+            "windows"
+        })
         .join("ffmpeg");
 
-    if is_linux {
+    if cfg!(target_os = "linux") {
         ffmpeg_path.join("alvr_build")
     } else {
         ffmpeg_path
@@ -68,37 +67,13 @@ fn main() {
         .include("cpp");
 
     if platform_name == "windows" {
-        let compat_include = alvr_filesystem::deps_dir().join("windows/mingw-include-compat");
-        let dxmath_include = alvr_filesystem::deps_dir().join("windows/directxmath");
-        if compat_include.exists() {
-            build.include(&compat_include);
-            if build.get_compiler().is_like_gnu() {
-                build
-                    .flag("-include")
-                    .flag(compat_include.join("alvr_prelude.h"))
-                    .flag("-D_GLIBCXX_HAS_GTHREADS")
-                    .flag("-pthread");
-            }
-        }
-        if dxmath_include.exists() {
-            build.include(dxmath_include);
-        }
-    }
-
-    if platform_name == "windows" {
         build
             .debug(false) // This is because we cannot link to msvcrtd (see below)
+            .flag("/permissive-")
             .define("NOMINMAX", None)
             .define("_WINSOCKAPI_", None)
             .define("_MBCS", None)
-            .define("_MT", None)
-            .define("WINVER", "0x0601")
-            .define("_WIN32_WINNT", "0x0601")
-            .define("_USE_MATH_DEFINES", None);
-        // `/permissive-` only exists in MSVC. A MinGW cross build rejects it.
-        if build.get_compiler().is_like_msvc() {
-            build.flag("/permissive-");
-        }
+            .define("_MT", None);
     } else if platform_name == "macos" {
         build.define("__APPLE__", None);
     }
@@ -106,16 +81,17 @@ fn main() {
     #[cfg(debug_assertions)]
     build.define("ALVR_DEBUG_LOG", None);
 
-    let gpl_or_linux = cfg!(feature = "gpl") || platform_name == "linux";
+    let gpl_or_linux = cfg!(feature = "gpl") || cfg!(target_os = "linux");
 
     if gpl_or_linux {
-        let ffmpeg_path = get_ffmpeg_path(&platform_name);
+        let ffmpeg_path = get_ffmpeg_path();
 
         assert!(ffmpeg_path.join("include").exists());
         build.include(ffmpeg_path.join("include"));
     }
 
-    if platform_name == "linux" && cfg!(feature = "gpl") {
+    #[cfg(all(target_os = "linux", feature = "gpl"))]
+    {
         let x264_path = get_linux_x264_path();
 
         assert!(x264_path.join("include").exists());
@@ -127,7 +103,8 @@ fn main() {
 
     build.compile("bindings");
 
-    if platform_name == "linux" && cfg!(feature = "gpl") {
+    #[cfg(all(target_os = "linux", feature = "gpl"))]
+    {
         let x264_path = get_linux_x264_path();
         let x264_lib_path = x264_path.join("lib");
 
@@ -156,7 +133,7 @@ fn main() {
 
     // ffmpeg
     if gpl_or_linux {
-        let ffmpeg_path = get_ffmpeg_path(&platform_name);
+        let ffmpeg_path = get_ffmpeg_path();
         let ffmpeg_lib_path = ffmpeg_path.join("lib");
 
         assert!(ffmpeg_lib_path.exists());
@@ -166,7 +143,8 @@ fn main() {
             ffmpeg_lib_path.to_string_lossy()
         );
 
-        if platform_name == "linux" {
+        #[cfg(target_os = "linux")]
+        {
             let ffmpeg_pkg_path = ffmpeg_lib_path.join("pkgconfig");
             assert!(ffmpeg_pkg_path.exists());
 
@@ -184,10 +162,9 @@ fn main() {
                 pkg.probe(lib).unwrap();
             }
         }
-        if platform_name == "windows" {
-            for lib in ["avutil", "avfilter", "avcodec", "swscale"] {
-                println!("cargo:rustc-link-lib={lib}");
-            }
+        #[cfg(windows)]
+        for lib in ["avutil", "avfilter", "avcodec", "swscale"] {
+            println!("cargo:rustc-link-lib={lib}");
         }
     }
 
@@ -216,19 +193,14 @@ fn main() {
                 .to_string_lossy()
         );
         println!("cargo:rustc-link-lib=openvr_api");
-        // MSVC 靠 #pragma comment(lib, ...) 自动链接，MinGW 会忽略这些 pragma
-        for lib in [
-            "winmm", "dxgi", "d3d11", "rpcrt4", "psapi", "dbghelp", "ole32", "oleaut32",
-            "user32", "gdi32", "shell32", "advapi32",
-        ] {
-            println!("cargo:rustc-link-lib={lib}");
-        }
     }
 
-    if platform_name == "linux" {
+    #[cfg(target_os = "linux")]
+    {
         pkg_config::Config::new().probe("vulkan").unwrap();
 
-        if !cfg!(feature = "gpl") {
+        #[cfg(not(feature = "gpl"))]
+        {
             pkg_config::Config::new().probe("x264").unwrap();
         }
 

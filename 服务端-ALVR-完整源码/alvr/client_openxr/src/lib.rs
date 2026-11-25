@@ -6,7 +6,6 @@ mod huawei_activity;
 mod huawei_input;
 #[cfg(target_os = "android")]
 mod huawei_runtime;
-mod huawei_session;
 mod interaction;
 mod lobby;
 mod passthrough;
@@ -18,7 +17,7 @@ use alvr_common::settings_schema::Switch;
 use alvr_common::{
     error,
     glam::{Quat, UVec2, Vec3},
-    info, warn,
+    info,
     parking_lot::RwLock,
     Fov, Pose, HAND_LEFT_ID,
 };
@@ -41,25 +40,6 @@ use stream::StreamContext;
 
 #[cfg(target_os = "android")]
 static HUAWEI_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
-
-/// 用「VR Glass 直接挂在我们自写 XrShim 上」的模式（例如 RK3566 盒子 HDMI 直连）时，
-/// 放一个 `<files>/submit_frames` 文件，内容 1/true/yes，ALVR 就会每帧 xrEndFrame，
-/// 由 shim 里的合成器做左右眼 SBS 输出。真华为手机上没有这个文件，行为不变。
-#[cfg(target_os = "android")]
-fn submit_frames_override() -> bool {
-    std::fs::read_to_string("/sdcard/Android/data/com.lht.huaweivr.alvr/files/submit_frames")
-        .map(|s| {
-            let s = s.trim().to_ascii_lowercase();
-            s == "1" || s == "true" || s == "yes" || s == "on"
-        })
-        .unwrap_or(false)
-}
-
-#[cfg(not(target_os = "android"))]
-#[allow(dead_code)]
-fn submit_frames_override() -> bool {
-    false
-}
 
 #[cfg(target_os = "android")]
 fn request_huawei_exit() {
@@ -262,11 +242,7 @@ fn entry_point_with_window(_huawei_native_window: Option<*mut c_void>) {
     exts.fb_composition_layer_settings = available_extensions.fb_composition_layer_settings;
     exts.fb_display_refresh_rate = available_extensions.fb_display_refresh_rate;
     exts.fb_eye_tracking_social = available_extensions.fb_eye_tracking_social;
-    // Not available in the vendored Huawei OpenXR bindings (see extra_extensions::face_tracking2_fb).
-    #[cfg(not(target_os = "android"))]
-    {
-        exts.fb_face_tracking2 = available_extensions.fb_face_tracking2;
-    }
+    exts.fb_face_tracking2 = available_extensions.fb_face_tracking2;
     exts.fb_foveation = available_extensions.fb_foveation;
     exts.fb_foveation_configuration = available_extensions.fb_foveation_configuration;
     exts.fb_passthrough = available_extensions.fb_passthrough;
@@ -521,9 +497,7 @@ fn entry_point_with_window(_huawei_native_window: Option<*mut c_void>) {
             // HVRSDK 3.5 does not expose XR_FB_display_refresh_rate, but the physical Huawei VR
             // display and Runtime compositor both run at 70 Hz. Advertising the generic 90 Hz
             // fallback overloads the Android 10 software decoder and mismatches frame pacing.
-            // The rate advertised here is also the server's frame pacing target, so it can be
-            // lowered (e.g. to 35 Hz) through `debug.alvr.refresh_rate`.
-            crate::huawei_session::refresh_rates()
+            vec![70.0]
         } else if exts.fb_display_refresh_rate {
             xr_session.enumerate_display_refresh_rates().unwrap()
         } else {
@@ -539,11 +513,9 @@ fn entry_point_with_window(_huawei_native_window: Option<*mut c_void>) {
         let capabilities = ClientCapabilities {
             default_view_resolution,
             refresh_rates,
-            // [HVR-FIX] Force foveated_encoding=false for the VR Glass client.
-            // The XrShim renderer cannot invert ALVR's fixed foveated encoding;
-            // when the server enables it the video collapses to blank frames.
-            // P30 (Huawei platform) also reports false and streams real scenes.
-            foveated_encoding: false,
+            // The Huawei direct framebuffer renderer does not yet implement ALVR's fixed
+            // foveated encoding inverse mapping. Keep the server on a linear stereo stream.
+            foveated_encoding: platform != Platform::Unknown && !platform.is_huawei(),
             encoder_high_profile: platform != Platform::Unknown,
             encoder_10_bits: platform != Platform::Unknown,
             encoder_av1: matches!(
@@ -593,74 +565,21 @@ fn entry_point_with_window(_huawei_native_window: Option<*mut c_void>) {
         let mut stream_context = None::<StreamContext>;
         let mut passthrough_layer = None;
 
-        // The Huawei legacy runtime does not implement the OpenXR frame loop (xrWaitFrame leaves
-        // predictedDisplayTime at zero, xrBeginFrame and xrEndFrame are both rejected), because it
-        // renders locally into the HVR surface it handed to the Activity. Drive the loop with a
-        // fixed period instead of asking the runtime for frame timing.
-        let huawei_frame_period = platform.is_huawei().then(|| {
-            let hz = crate::huawei_session::refresh_rates()
-                .first()
-                .copied()
-                .filter(|hz| *hz > 1.0)
-                .unwrap_or(70.0);
-            info!("[HVR-DIAG] Huawei render loop paced at {hz}Hz");
-
-            Duration::from_secs_f64(1.0 / hz as f64)
-        });
-
-        // 真华为设备上，华为运行时会自己合成 app 的 EGL surface，所以 ALVR 不能提交图层；
-        // 但换成我们自写的 XrShim（例如把 VR Glass 直接接在 RK3566 盒子的 HDMI 上）时，
-        // 合成是由 shim 里的 xrEndFrame 做的，ALVR 必须每帧提交，否则画面永远上不了屏。
-        // 用 files/submit_frames 这个文件区分两者。
-        let huawei_submit_frames = platform.is_huawei() && submit_frames_override();
-        let huawei_native_compositor = platform.is_huawei() && !huawei_submit_frames;
-        if huawei_submit_frames {
-            info!("[HVR-DIAG] Huawei shim compositor: 每帧提交图层 (xrEndFrame)");
-        }
-
         let mut event_storage = xr::EventDataBuffer::new();
-        // Temporary trace: if the Huawei render thread stalls, these tell us which call blocks.
-        let mut loop_trace = 0_u32;
         'render_loop: loop {
-            let trace = platform.is_huawei() && loop_trace < 5000;
-            if trace {
-                info!("[HVR-DIAG] frame {loop_trace}: loop top");
-            }
-            loop_trace = loop_trace.saturating_add(1);
             #[cfg(target_os = "android")]
             if platform.is_huawei() && HUAWEI_EXIT_REQUESTED.load(Ordering::Acquire) {
                 info!("[HVR-DIAG] Huawei Activity requested OpenXR shutdown");
                 break 'session_loop;
             }
 
-            // The Huawei runtime's xrPollEvent blocks once its queue is drained instead of
-            // returning XR_EVENT_UNAVAILABLE, which parks the render thread a couple of seconds
-            // after startup. Poll only until the session is running (that is what delivers READY,
-            // which is required to call xrBeginSession) and stop afterwards; shutdown is driven by
-            // HUAWEI_EXIT_REQUESTED instead.
-            if trace {
-                info!(
-                    "[HVR-DIAG] frame {}: before xr poll (running={session_running})",
-                    loop_trace - 1
-                );
-            }
-
-            if !platform.is_huawei() || !session_running {
-                while let Some(event) = xr_instance.poll_event(&mut event_storage).unwrap() {
+            while let Some(event) = xr_instance.poll_event(&mut event_storage).unwrap() {
                 match event {
                     xr::Event::EventsLost(event) => {
                         error!("OpenXR: lost {} events!", event.lost_event_count());
                     }
                     xr::Event::InstanceLossPending(_) => break 'session_loop,
-                    xr::Event::SessionStateChanged(event) => {
-                        if platform.is_huawei() {
-                            info!(
-                                "[HVR-DIAG] Huawei session state changed to {:?}",
-                                event.state()
-                            );
-                        }
-
-                        match event.state() {
+                    xr::Event::SessionStateChanged(event) => match event.state() {
                         xr::SessionState::READY => {
                             xr_session
                                 .begin(xr::ViewConfigurationType::PRIMARY_STEREO)
@@ -685,8 +604,7 @@ fn entry_point_with_window(_huawei_native_window: Option<*mut c_void>) {
                             break 'render_loop
                         }
                         _ => (),
-                        }
-                    }
+                    },
                     xr::Event::ReferenceSpaceChangePending(event) => {
                         info!(
                             "ReferenceSpaceChangePending type: {:?}",
@@ -714,19 +632,11 @@ fn entry_point_with_window(_huawei_native_window: Option<*mut c_void>) {
                     }
                     _ => (),
                 }
-                }
             }
 
             if !session_running {
                 thread::sleep(Duration::from_millis(100));
                 continue;
-            }
-
-            if trace {
-                info!(
-                    "[HVR-DIAG] frame {}: events drained",
-                    loop_trace - 1
-                );
             }
 
             while let Some(event) = core_context.poll_event() {
@@ -737,10 +647,6 @@ fn entry_point_with_window(_huawei_native_window: Option<*mut c_void>) {
                     }
                     ClientCoreEvent::StreamingStarted(config) => {
                         let config = ParsedStreamConfig::new(&config);
-
-                        if platform.is_huawei() {
-                            info!("[HVR-DIAG] StreamingStarted handled, building StreamContext");
-                        }
 
                         let context = StreamContext::new(
                             Arc::clone(&core_context),
@@ -809,79 +715,30 @@ fn entry_point_with_window(_huawei_native_window: Option<*mut c_void>) {
                 }
             }
 
-            let frame_state = if let Some(period) = huawei_frame_period {
-                // The runtime never fills in frame timing, so manufacture a frame state from its
-                // own clock. Its compositor only needs a sane, monotonically increasing display
-                // time to locate the views for this frame.
-                let now = crate::xr_runtime_now(xr_session.instance())
-                    .map(|t| t.as_nanos())
-                    .unwrap_or_default();
-                let period_nanos = period.as_nanos() as i64;
-
-                xr::FrameState {
-                    predicted_display_time: xr::Time::from_nanos(now + period_nanos),
-                    predicted_display_period: xr::Duration::from_nanos(period_nanos),
-                    should_render: true,
-                }
-            } else {
-                match xr_frame_waiter.wait() {
-                    Ok(state) => state,
-                    Err(e) => {
-                        error!("{e}");
-                        panic!();
-                    }
+            let frame_state = match xr_frame_waiter.wait() {
+                Ok(state) => state,
+                Err(e) => {
+                    error!("{e}");
+                    panic!();
                 }
             };
-            let frame_interval = Duration::from_nanos(
-                frame_state.predicted_display_period.as_nanos() as _
-            );
+            let frame_interval =
+                Duration::from_nanos(frame_state.predicted_display_period.as_nanos() as _);
             let vsync_time =
                 Duration::from_nanos(frame_state.predicted_display_time.as_nanos() as _);
 
-            if trace {
-                info!(
-                    "[HVR-DIAG] frame {}: wait ok, should_render={}",
-                    loop_trace - 1,
-                    frame_state.should_render
-                );
-            }
-
-            // The Huawei runtime has no usable frame loop: xrBeginFrame answers
-            // XR_ERROR_VALIDATION_FAILURE for every frame and xrEndFrame then reports a broken
-            // call order. Since a begun frame is a precondition for xrAcquireSwapchainImage, the
-            // Huawei renderers never touch an OpenXR swapchain either -- they draw into the HVR
-            // surface handed over by Java, and nothing is submitted when the frame ends.
-            if !huawei_native_compositor {
-                if let Err(e) = xr_frame_stream.begin() {
-                    panic!("xrBeginFrame failed: {e}");
-                }
-            }
+            xr_frame_stream.begin().unwrap();
 
             if !frame_state.should_render {
-                if !huawei_native_compositor {
-                    let _ = xr_frame_stream.end(
+                xr_frame_stream
+                    .end(
                         frame_state.predicted_display_time,
                         xr::EnvironmentBlendMode::OPAQUE,
                         &[],
-                    );
-                }
+                    )
+                    .unwrap();
 
                 continue;
-            }
-
-            if trace {
-                info!(
-                    "[HVR-DIAG] frame {}: rendering (stream={})",
-                    loop_trace - 1,
-                    stream_context.is_some()
-                );
-            }
-
-            // The Huawei runtime repeatedly takes the application's EGL surface for its own
-            // compositor pass. Once it does, the next GL call on this thread blocks forever, which
-            // froze the render loop about a second after startup. Re-bind our context every frame.
-            if platform.is_huawei() {
-                graphics_context.make_current();
             }
 
             // todo: allow rendering lobby and stream layers at the same time and add cross fade
@@ -890,18 +747,6 @@ fn entry_point_with_window(_huawei_native_window: Option<*mut c_void>) {
             } else {
                 (lobby.render(vsync_time), vsync_time)
             };
-
-            if trace {
-                info!("[HVR-DIAG] frame {}: render done", loop_trace - 1);
-            }
-
-            if huawei_native_compositor {
-                // 真华为设备：华为运行时会合成 app 刚画进去的那个 surface，并且拒绝所有
-                // 帧循环提交，所以这里什么都不用结束；自己按固定周期节拍即可。
-                thread::sleep(huawei_frame_period.unwrap_or(frame_interval));
-
-                continue;
-            }
 
             let layers: &[&xr::CompositionLayerBase<_>] =
                 if let Some(passthrough_layer) = &passthrough_layer {
@@ -913,7 +758,9 @@ fn entry_point_with_window(_huawei_native_window: Option<*mut c_void>) {
             // Huawei's legacy runtime moves the application EGL context to its compositor after
             // releasing the acquired images. The official sample calls xrEndFrame directly;
             // trying to reclaim the context here fails with EGL_BAD_ACCESS.
-            graphics_context.make_current();
+            if !platform.is_huawei() {
+                graphics_context.make_current();
+            }
             let res = xr_frame_stream.end(
                 to_xr_time(display_time),
                 xr::EnvironmentBlendMode::OPAQUE,
@@ -925,13 +772,13 @@ fn entry_point_with_window(_huawei_native_window: Option<*mut c_void>) {
                 error!("End frame failed! {e}, timestamp: {display_time:?}, time: {time:?}");
 
                 if !platform.is_vive() {
-                    // Closing the failed frame again is best effort: never let the retry itself
-                    // panic and take the process down.
-                    let _ = xr_frame_stream.end(
-                        frame_state.predicted_display_time,
-                        xr::EnvironmentBlendMode::OPAQUE,
-                        &[],
-                    );
+                    xr_frame_stream
+                        .end(
+                            frame_state.predicted_display_time,
+                            xr::EnvironmentBlendMode::OPAQUE,
+                            &[],
+                        )
+                        .unwrap();
                 }
             }
         }

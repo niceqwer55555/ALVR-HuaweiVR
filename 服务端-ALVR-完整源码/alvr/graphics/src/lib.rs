@@ -155,36 +155,10 @@ impl HuaweiEglContext {
             .expect("failed to restore the Huawei EGL context");
     }
 
-    /// Pushes the rendered frame to the HVR surface. Without this the runtime compositor has
-    /// nothing to show and the GL command queue backs up until a synchronous call blocks.
-    pub fn swap_buffers(&self) {
-        unsafe {
-            let _ = self.egl.swap_buffers(self.display, self.surface);
-        }
-    }
-
     pub fn get_proc_address(&self, name: &str) -> *const c_void {
         self.egl
             .get_proc_address(name)
             .map_or(ptr::null(), |function| function as *const c_void)
-    }
-
-    /// Size of the HVR window surface, i.e. the largest rectangle fbo 0 can cover.
-    ///
-    /// The surface handed to the client is the phone screen (e.g. 1080x2265), which is *not* the
-    /// eye resolution requested by the server. Anything rendered outside this rectangle is clipped
-    /// away by the window system, so the direct-framebuffer renderers have to clamp their viewport
-    /// to it before copying the result into the eye textures.
-    pub fn surface_size(&self) -> (i32, i32) {
-        let width = self
-            .egl
-            .query_surface(self.display, self.surface, egl::WIDTH)
-            .unwrap_or(0);
-        let height = self
-            .egl
-            .query_surface(self.display, self.surface, egl::HEIGHT)
-            .unwrap_or(0);
-        (width, height)
     }
 }
 
@@ -381,26 +355,6 @@ pub struct GraphicsContext {
 }
 
 impl GraphicsContext {
-    /// Pushes the rendered frame to the HVR surface. Without this the runtime compositor has
-    /// nothing to show and the GL command queue backs up until a synchronous call blocks.
-    #[cfg(target_os = "android")]
-    pub fn swap_huawei_buffers(&self) {
-        if let Some(huawei_egl) = &self.huawei_egl {
-            huawei_egl.swap_buffers();
-        }
-    }
-
-    /// Size of the surface fbo 0 points at, or `(0, 0)` when it cannot be queried through EGL
-    /// (the non-Huawei paths render into textures and never need this).
-    pub fn surface_size(&self) -> (i32, i32) {
-        #[cfg(target_os = "android")]
-        if let Some(huawei_egl) = &self.huawei_egl {
-            return huawei_egl.surface_size();
-        }
-
-        (0, 0)
-    }
-
     #[cfg(not(windows))]
     pub fn new_gl() -> Self {
         Self::new_gl_internal(None)

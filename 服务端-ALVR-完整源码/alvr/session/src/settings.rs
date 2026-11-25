@@ -1277,112 +1277,6 @@ pub enum RotationRecenteringMode {
     Tilted,
 }
 
-#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
-#[schema(collapsible)]
-pub struct ThreeDofConfig {
-    #[schema(strings(
-        display_name = "Eye height",
-        help = "Height of the virtual viewpoint above the recentered play space origin. Since 3DoF mode has no positional tracking, the head is placed at a fixed height instead. Follow SteamVR standing convention, e.g. 1.6 for standing or 1.2 for seated."
-    ))]
-    #[schema(flag = "real-time")]
-    #[schema(gui(slider(min = 0.5, max = 2.2, step = 0.05)), suffix = "m")]
-    pub eye_height_m: f32,
-
-    #[schema(strings(
-        display_name = "Prefer runtime head height",
-        help = "Some runtimes keep reporting a plausible standing height even without positional tracking. When enabled and that height is above 0.2 m, it is used instead of the eye height above."
-    ))]
-    #[schema(flag = "real-time")]
-    pub prefer_runtime_height: bool,
-}
-
-// Huawei VR Glass can be used standalone (3DoF, glasses IMU only) or with the 6DoF tracking kit.
-// The same applies to other headsets where positional tracking may or may not be available at
-// runtime, so the choice is exposed as a three way mode instead of a plain on/off switch.
-#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
-#[schema(gui = "button_group")]
-pub enum ThreeDofMode {
-    // Note: the variant order matters. Settings are sent to the client with bincode, which encodes
-    // the variant index, and older clients still declare this field as `Switch<ThreeDofConfig>`
-    // (Disabled = 0, Enabled = 1). Keeping "Auto" first makes old clients read it as "Disabled",
-    // so they never clamp the head pose and let the server decide, which is exactly what the Auto
-    // mode does. "On" is read as "Enabled" with the same payload, so it behaves the same too.
-    #[schema(strings(
-        display_name = "Auto",
-        help = "Detect positional tracking at runtime: as soon as a controller reports a real position the head pose is left untouched; if no 6DoF controller shows up within a few seconds the head is locked at the configured eye height. Controllers that only report rotation (like the Huawei 3DoF remote) do not count as 6DoF."
-    ))]
-    Auto(ThreeDofConfig),
-
-    #[schema(strings(
-        display_name = "Always on",
-        help = "Always ignore positional tracking and lock the viewpoint at the configured eye height, even when 6DoF controllers are connected."
-    ))]
-    On(ThreeDofConfig),
-
-    #[schema(strings(
-        display_name = "Off",
-        help = "Never touch the head pose. Use this when the headset really has positional tracking, for example Huawei VR Glass with a working 6DoF kit. Requires an up to date client."
-    ))]
-    Off,
-}
-
-impl ThreeDofMode {
-    /// 3DoF compensation to apply unconditionally, regardless of what is tracked.
-    pub fn forced_config(&self) -> Option<&ThreeDofConfig> {
-        match self {
-            Self::Off | Self::Auto(_) => None,
-            Self::On(config) => Some(config),
-        }
-    }
-
-    /// 3DoF compensation to apply when no 6DoF controller has been detected.
-    pub fn auto_config(&self) -> Option<&ThreeDofConfig> {
-        match self {
-            Self::Off => None,
-            Self::Auto(config) | Self::On(config) => Some(config),
-        }
-    }
-
-    pub fn is_auto(&self) -> bool {
-        matches!(self, Self::Auto(_))
-    }
-}
-
-#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
-#[schema(collapsible)]
-pub struct CastConfig {
-    #[schema(strings(
-        display_name = "Monitor index",
-        help = "Zero based index of the monitor to duplicate, as enumerated by Windows. 0 is normally the primary external or built-in display."
-    ))]
-    #[schema(flag = "steamvr-restart")]
-    pub monitor_index: u32,
-
-    #[schema(strings(
-        display_name = "Screen size",
-        help = "Angular size of the virtual screen, as a fraction of the streamed view. 1.0 fills the whole field of view, lower values leave a black margin around the desktop."
-    ))]
-    #[schema(flag = "steamvr-restart")]
-    #[schema(gui(slider(min = 0.4, max = 1.0, step = 0.05)))]
-    pub screen_size: f32,
-
-    #[schema(strings(
-        display_name = "Stereo separation",
-        help = "Horizontal pixel offset applied between the two eyes. Zero renders the same image to both eyes, which reads as a flat screen at a distance. Higher values pull the screen nearer, at the cost of eye strain if exaggerated."
-    ))]
-    #[schema(flag = "steamvr-restart")]
-    #[schema(gui(slider(min = 0, max = 64, step = 1)), suffix = "px")]
-    pub stereo_separation_px: u32,
-
-    #[schema(strings(
-        display_name = "Capture frame rate",
-        help = "Desktop capture frame rate. Higher values look smoother but cost more CPU or GPU time before encoding."
-    ))]
-    #[schema(flag = "steamvr-restart")]
-    #[schema(gui(slider(min = 24, max = 90, step = 1)), suffix = "Hz")]
-    pub capture_fps: u32,
-}
-
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct HeadsetConfig {
     #[schema(strings(
@@ -1430,20 +1324,6 @@ Tilted: the world gets tilted when long pressing the oculus button. This is usef
     ))]
     #[schema(gui(slider(min = 0, max = 200, step = 5)), suffix = "ms")]
     pub max_prediction_ms: u64,
-
-    #[schema(strings(
-        display_name = "3DoF mode",
-        help = r#"Ignore positional tracking and use head rotation only. Useful with Huawei VR Glass without the 6DoF kit, or to remove positional jitter. The viewpoint is locked at a fixed eye height above the recentered play space origin. "Auto" enables it only when no 6DoF controller is detected."#
-    ))]
-    #[schema(flag = "real-time")]
-    pub three_dof: ThreeDofMode,
-
-    #[schema(strings(
-        display_name = "Desktop cast mode",
-        help = r#"Replace the SteamVR picture with the PC desktop, shown as a flat virtual screen in front of you. Requires a SteamVR restart."#
-    ))]
-    #[schema(flag = "steamvr-restart")]
-    pub cast: Switch<CastConfig>,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone, Copy)]
@@ -1796,9 +1676,7 @@ pub fn session_settings_default() -> SettingsDefault {
             bitrate: BitrateConfigDefault {
                 gui_collapsed: false,
                 mode: BitrateModeDefault {
-                    // Headsets like Huawei VR Glass render 3200x1600@70Hz: 30 Mbps is far too low
-                    // and results in a blurry picture, 100 Mbps is a sane starting point.
-                    ConstantMbps: 100,
+                    ConstantMbps: 30,
                     Adaptive: BitrateModeAdaptiveDefault {
                         gui_collapsed: true,
                         saturation_multiplier: 0.95,
@@ -1982,7 +1860,7 @@ pub fn session_settings_default() -> SettingsDefault {
                     contrast: 0.,
                     saturation: 0.5,
                     gamma: 1.,
-                    sharpening: 0.8,
+                    sharpening: 0.5,
                 },
             },
         },
@@ -2208,29 +2086,6 @@ pub fn session_settings_default() -> SettingsDefault {
             },
             rotation_recentering_mode: RotationRecenteringModeDefault {
                 variant: RotationRecenteringModeDefaultVariant::Yaw,
-            },
-            three_dof: ThreeDofModeDefault {
-                Auto: ThreeDofConfigDefault {
-                    gui_collapsed: true,
-                    eye_height_m: 1.6,
-                    prefer_runtime_height: true,
-                },
-                On: ThreeDofConfigDefault {
-                    gui_collapsed: true,
-                    eye_height_m: 1.6,
-                    prefer_runtime_height: true,
-                },
-                variant: ThreeDofModeDefaultVariant::Auto,
-            },
-            cast: SwitchDefault {
-                enabled: false,
-                content: CastConfigDefault {
-                    gui_collapsed: false,
-                    monitor_index: 0,
-                    screen_size: 0.9,
-                    stereo_separation_px: 0,
-                    capture_fps: 60,
-                },
             },
             max_prediction_ms: 100,
         },

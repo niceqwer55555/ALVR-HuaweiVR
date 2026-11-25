@@ -1,4 +1,3 @@
-use super::HuaweiDriverPanel;
 use alvr_gui_common::theme;
 use alvr_packets::{FirewallRulesAction, ServerRequest};
 use eframe::{
@@ -19,7 +18,6 @@ pub enum InstallationTabRequest {
 
 pub struct InstallationTab {
     drivers: Vec<PathBuf>,
-    hardware: HuaweiDriverPanel,
     last_update_instant: Instant,
 }
 
@@ -27,7 +25,6 @@ impl InstallationTab {
     pub fn new() -> Self {
         Self {
             drivers: vec![],
-            hardware: HuaweiDriverPanel::new(),
             last_update_instant: Instant::now(),
         }
     }
@@ -95,18 +92,6 @@ impl InstallationTab {
                             ServerRequest::RegisterAlvrDriver,
                         ));
                     }
-                });
-
-            ui.add_space(10.0);
-            theme::card_frame(ui.ctx())
-                .fill(theme::palette(ui.ctx()).surface)
-                .show(ui, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(5.0);
-                        ui.label(RichText::new("华为硬件驱动（设备管理器）").size(18.0));
-                    });
-                    ui.add_space(4.0);
-                    self.hardware.ui(ui);
                 });
         });
 

@@ -1,4 +1,3 @@
-use super::HuaweiDriverPanel;
 use crate::icons;
 use alvr_packets::{FirewallRulesAction, ServerRequest};
 use eframe::{
@@ -16,11 +15,10 @@ enum Page {
     Welcome = 0,
     ResetSettings = 1,
     HardwareRequirements = 2,
-    HardwareDrivers = 3,
-    SoftwareRequirements = 4,
-    Firewall = 5,
-    Recommendations = 6,
-    Finished = 7,
+    SoftwareRequirements = 3,
+    Firewall = 4,
+    Recommendations = 5,
+    Finished = 6,
 }
 
 fn index_to_page(index: usize) -> Page {
@@ -28,11 +26,10 @@ fn index_to_page(index: usize) -> Page {
         0 => Page::Welcome,
         1 => Page::ResetSettings,
         2 => Page::HardwareRequirements,
-        3 => Page::HardwareDrivers,
-        4 => Page::SoftwareRequirements,
-        5 => Page::Firewall,
-        6 => Page::Recommendations,
-        7 => Page::Finished,
+        3 => Page::SoftwareRequirements,
+        4 => Page::Firewall,
+        5 => Page::Recommendations,
+        6 => Page::Finished,
         _ => panic!("Invalid page index"),
     }
 }
@@ -60,14 +57,12 @@ fn page_content(
 
 pub struct SetupWizard {
     page: Page,
-    drivers: HuaweiDriverPanel,
 }
 
 impl SetupWizard {
     pub fn new() -> Self {
         Self {
             page: Page::Welcome,
-            drivers: HuaweiDriverPanel::new(),
         }
     }
 
@@ -93,7 +88,7 @@ impl SetupWizard {
             })
         });
         ui.separator();
-        match self.page {
+        match &self.page {
             Page::Welcome => page_content(
                 ui,
                 "此向导将帮助你完成 ALVR 的基础设置。",
@@ -117,13 +112,6 @@ impl SetupWizard {
                 "硬件要求",
                 "ALVR 需要较新的独立显卡，低端 Intel 集成显卡可能无法使用。\n请确认系统至少有一个音频输出设备。",
                 |_| (),
-            ),
-            Page::HardwareDrivers => page_content(
-                ui,
-                "华为硬件驱动",
-                "眼镜在设备管理器里是三类设备：DisplayPort 显示器、USB 复合设备（IMU/按键）和可选的虚拟显示器。\n\
-                 新机器或设备带黄色感叹号时，在这里一次装完；装完仍异常就拔插一次 USB-C。",
-                |ui| self.drivers.ui(ui),
             ),
             Page::SoftwareRequirements => page_content(
                 ui,

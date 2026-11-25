@@ -19,7 +19,6 @@ use std::{
     ffi::OsStr,
     fs,
     marker::PhantomData,
-    path::PathBuf,
     thread,
     time::{Duration, Instant},
 };
@@ -28,89 +27,6 @@ use sysinfo::{ProcessesToUpdate, System};
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const DRIVER_KEY: &str = "driver_alvr_server";
 const BLOCKED_KEY: &str = "blocked_by_safe_mode";
-
-// SteamVR path configured by the user in the dashboard. It is kept here so that
-// every launch entry point (startup, drawer button, devices tab) uses the same
-// value without threading it through the whole UI.
-pub static MANUAL_STEAMVR_PATH: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
-
-const STEAMVR_PATH_FILE: &str = "steamvr_path.txt";
-
-/// Sidecar file next to the dashboard executable. SteamVR may be launched
-/// before the dashboard UI loads its own storage, so the path is mirrored here.
-fn steamvr_path_file() -> Option<std::path::PathBuf> {
-    let mut dir = std::env::current_exe().ok()?;
-    dir.pop();
-    Some(dir.join(STEAMVR_PATH_FILE))
-}
-
-pub fn set_manual_steamvr_path(path: impl Into<String>) {
-    let path = path.into();
-
-    if let Some(file) = steamvr_path_file() {
-        let _ = fs::write(file, &path);
-    }
-
-    *MANUAL_STEAMVR_PATH.lock() = path;
-}
-
-pub fn load_persisted_steamvr_path() {
-    if let Some(file) = steamvr_path_file() {
-        if let Ok(text) = fs::read_to_string(file) {
-            *MANUAL_STEAMVR_PATH.lock() = text.trim().to_owned();
-        }
-    }
-}
-
-pub fn manual_steamvr_path() -> String {
-    MANUAL_STEAMVR_PATH.lock().clone()
-}
-
-/// Resolves an arbitrary user supplied path (without touching the stored
-/// setting). Used by the "Steam library" tab to show a live preview.
-#[cfg(windows)]
-pub fn resolve_steamvr_path(input: &str) -> Option<PathBuf> {
-    windows_steamvr::resolve_steamvr_launch_path(input)
-}
-
-#[cfg(not(windows))]
-pub fn resolve_steamvr_path(_input: &str) -> Option<PathBuf> {
-    None
-}
-
-/// SteamVR runtime root for the configured path (or the bundled runtime), used
-/// to write openvrpaths.vrpath so SteamVR works without the Steam client.
-#[cfg(windows)]
-pub fn resolve_steamvr_runtime_root(input: &str) -> Option<PathBuf> {
-    windows_steamvr::resolve_steamvr_runtime_root(input)
-}
-
-#[cfg(not(windows))]
-pub fn resolve_steamvr_runtime_root(_input: &str) -> Option<PathBuf> {
-    None
-}
-
-/// Makes openvrpaths.vrpath exist and point at the configured SteamVR runtime.
-/// Without this file, driver registration fails silently and OpenVR games
-/// cannot find the runtime on machines without a Steam client installation.
-fn ensure_standalone_openvr_paths() {
-    #[cfg(windows)]
-    {
-        let Some(runtime_root) = resolve_steamvr_runtime_root(&manual_steamvr_path()) else {
-            warn!("Standalone config skipped: no SteamVR runtime found");
-            return;
-        };
-
-        match alvr_server_io::ensure_openvr_paths_file(&runtime_root) {
-            Ok(path) => debug!(
-                "openvrpaths ready: {} (runtime {})",
-                path.display(),
-                runtime_root.display()
-            ),
-            Err(err) => warn!("Failed to prepare openvrpaths.vrpath: {err:?}"),
-        }
-    }
-}
 
 pub fn is_steamvr_running() -> bool {
     System::new_all()
@@ -192,220 +108,6 @@ fn unblock_alvr_driver_within_vrsettings(text: &str) -> Result<String> {
     Ok(serde_json::to_string_pretty(&settings)?)
 }
 
-/// Sidecar file next to the dashboard executable. One EDID keyword per line (or
-/// comma separated). When it is missing the built-in list is used.
-const GLASSES_EDID_FILE: &str = "glasses_edid.txt";
-
-/// Sidecar file next to the dashboard executable. One of `auto`, `usb`, `adb`.
-/// `usb` = glasses docked to the PC -> official wired driver; `adb` = glasses
-/// on the phone linked by USB adb -> ALVR driver; `auto` (or missing) keeps the
-/// EDID-based detection. Written by scripts/huawei/auto-vr-mode.ps1 so an
-/// explicit choice survives the next SteamVR start (otherwise the automatic
-/// driver selection would silently overwrite it).
-const VR_MODE_FILE: &str = "vr_mode.txt";
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ConnectionMode {
-    Auto,
-    Usb,
-    Adb,
-}
-
-/// Reads the user's wired-connection choice. Anything unrecognized (including
-/// a missing file) falls back to `auto`, so upgrading never breaks an install.
-fn connection_mode() -> ConnectionMode {
-    let mut dir = match std::env::current_exe() {
-        Ok(dir) => dir,
-        Err(_) => return ConnectionMode::Auto,
-    };
-    dir.pop();
-
-    let Ok(text) = fs::read_to_string(dir.join(VR_MODE_FILE)) else {
-        return ConnectionMode::Auto;
-    };
-
-    match text.trim().trim_matches('"').to_ascii_lowercase().as_str() {
-        // Aliases accepted so the file can hold either the connection kind or
-        // the driver name used by switch-vr-driver.ps1.
-        "usb" | "wired" | "huawei" => ConnectionMode::Usb,
-        "adb" | "phone" | "alvr" => ConnectionMode::Adb,
-        _ => ConnectionMode::Auto,
-    }
-}
-
-/// Connection mode currently in effect, for the UI to display.
-pub fn selected_connection_mode() -> &'static str {
-    match connection_mode() {
-        ConnectionMode::Auto => "auto",
-        ConnectionMode::Usb => "usb",
-        ConnectionMode::Adb => "adb",
-    }
-}
-
-/// The glasses are a plain DisplayPort panel, so they are identified by the
-/// monitor EDID they report. `RTK2560` is the Realtek bridge inside the HUAWEI
-/// VR Glass; the rest are fallbacks for other reports.
-const DEFAULT_GLASSES_KEYWORDS: &[&str] = &[
-    "RTK2560", "HUAWEI", "VRGLASS", "VR GLASS",
-    // Newer CV10 firmware reports the DP sink as HWV0003 (or AV03), not
-    // RTK2560. Keep these so EDID detection still identifies the glasses.
-    "HWV", "AV03", "CV10",
-];
-
-fn glasses_edid_keywords() -> Vec<String> {
-    let mut dir = match std::env::current_exe().ok() {
-        Some(dir) => dir,
-        None => return DEFAULT_GLASSES_KEYWORDS.iter().map(|s| s.to_string()).collect(),
-    };
-    dir.pop();
-
-    if let Ok(text) = fs::read_to_string(dir.join(GLASSES_EDID_FILE)) {
-        let keywords = text
-            .split(|c: char| c == ',' || c == '\n' || c == '\r')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-
-        if !keywords.is_empty() {
-            return keywords;
-        }
-    }
-
-    DEFAULT_GLASSES_KEYWORDS.iter().map(|s| s.to_string()).collect()
-}
-
-/// Huawei VR Glass: the glasses have a single USB-C port, so ALVR and the official
-/// wired driver can never work at the same time - whichever one SteamVR activates
-/// decides whether you get a picture at all.
-///
-/// Policy: ask the hardware, not the phone. The headset is only a DisplayPort
-/// panel (the phone is the computer), so when it is plugged into this PC it shows
-/// up as a monitor and EDID says so. Found -> official wired wins; not found ->
-/// the glasses must be on the phone, so ALVR (over WiFi) wins.
-///
-/// Note that ALVR's own "wired" mode (adb forward over a PC<->phone USB cable)
-/// cannot apply here: the glasses occupy the phone's only USB-C port, so the
-/// phone can only reach the PC over WiFi.
-///
-/// SteamVR reads the enable flags while starting up, so this must run before it
-/// is launched.
-/// Ensure both bundled drivers are registered with SteamVR, then switch to the
-/// one matching the current connection. Call this from UI actions that need
-/// "auto-install driver" behaviour (e.g. enabling the wired client).
-pub fn ensure_drivers_installed() {
-    let alvr_dir = crate::get_filesystem_layout().openvr_driver_root_dir;
-    alvr_server_io::driver_registration(&[alvr_dir], true).ok();
-
-    let mut bundled_huawei = std::env::current_exe().unwrap_or_default();
-    bundled_huawei.pop();
-    bundled_huawei.push("huawei-driver");
-    if let Err(err) = alvr_server_io::register_bundled_huawei_driver(&bundled_huawei) {
-        warn!("Failed to register bundled Huawei driver: {err:?}");
-    }
-    apply_auto_driver_selection();
-}
-
-/// Periodically called from the dashboard UI loop. Detects a change in the
-/// physical connection (glasses docked to PC vs wireless) and re-runs the
-/// driver install/switch only when needed. Keeps auto-switch working even when
-/// the external watcher process is not running.
-pub fn auto_switch_if_needed(last_on_pc: &mut Option<bool>) -> bool {
-    let keywords = glasses_edid_keywords();
-    let on_pc = alvr_server_io::is_glasses_attached_to_pc(&keywords);
-    if last_on_pc.map(|v| v != on_pc).unwrap_or(false) {
-        ensure_drivers_installed();
-        *last_on_pc = Some(on_pc);
-        true
-    } else {
-        if last_on_pc.is_none() { *last_on_pc = Some(on_pc); }
-        false
-    }
-}
-
-/// Switch enable flags + OpenVR load list to the driver matching the current
-/// physical connection. Assumes both drivers are already registered.
-pub fn apply_auto_driver_selection() {
-    let mode = connection_mode();
-
-    // Physical topology / explicit choice decides, with no dependency on the
-    // Huawei assistant: `usb` (or auto + glasses on PC) -> official driver,
-    // `adb` (or auto + glasses off PC) -> ALVR.
-    let use_huawei = match mode {
-        ConnectionMode::Usb => true,
-        ConnectionMode::Adb => false,
-        ConnectionMode::Auto => {
-            let keywords = glasses_edid_keywords();
-            alvr_server_io::is_glasses_attached_to_pc(&keywords)
-        }
-    };
-    let hmd = if use_huawei {
-        alvr_server_io::HmdDriver::Huawei
-    } else {
-        alvr_server_io::HmdDriver::Alvr
-    };
-
-    // 1) enable flag in steamvr.vrsettings
-    if let Err(err) = alvr_server_io::select_driver(use_huawei) {
-        warn!("Driver enable selection failed: {err:?}");
-    }
-
-    // 2) SteamVR load list (openvrpaths.vrpath): keep only the active HMD
-    //    driver registered. Third-party drivers are preserved.
-    let storage = std::env::current_exe()
-        .ok()
-        .map(|p| {
-            let mut d = p;
-            d.pop();
-            d
-        })
-        .unwrap_or_default();
-    let alvr_dir = crate::get_filesystem_layout().openvr_driver_root_dir;
-    let huawei_dir = storage.join("huawei-driver");
-    match alvr_server_io::apply_driver_registration_for_mode(hmd, &alvr_dir, &huawei_dir, &storage) {
-        Ok(()) => debug!("Driver load list: kept {:?} (mode {mode:?})", hmd),
-        Err(err) => warn!("Driver load-list selection failed: {err:?}"),
-    }
-
-    // The phone normally is NOT on USB (its port is taken by the glasses), so
-    // this is usually empty. Keep it for the rare case where adb is reachable.
-    let adb_path = adb::get_adb_path(&crate::get_filesystem_layout());
-    let usb_serials = adb_path
-        .as_deref()
-        .and_then(|path| adb::list_usb_device_serials(path).ok())
-        .unwrap_or_default();
-
-    if !usb_serials.is_empty() {
-        if let Some(path) = adb_path.as_deref() {
-            launch_huawei_vr_client(path, &usb_serials);
-        }
-    }
-}
-
-/// The wired client cannot be started by ALVR's own autolaunch: it uses
-/// `monkey`, which opens the app without the VR action and the phone never
-/// enters VR mode. Start it ourselves with the right intent, otherwise the
-/// wired connection keeps reporting "No suitable ALVR client is installed".
-fn launch_huawei_vr_client(adb_path: &str, serials: &[String]) {
-    // Must match connection.wired_client_type in session.json.
-    const CLIENT_PACKAGE: &str = "com.lht.huaweivr.alvr";
-    const CLIENT_ACTIVITY: &str = ".HuaweiVrActivity";
-    const VR_MAIN_ACTION: &str = "com.huawei.android.vr.action.MAIN";
-
-    for serial in serials {
-        match adb::start_application_with_action(
-            adb_path,
-            serial,
-            CLIENT_PACKAGE,
-            CLIENT_ACTIVITY,
-            VR_MAIN_ACTION,
-        ) {
-            Ok(()) => debug!("Launched Huawei VR client on {serial}"),
-            Err(err) => warn!("Failed to launch Huawei VR client on {serial}: {err:?}"),
-        }
-    }
-}
-
 pub struct Launcher {
     _phantom: PhantomData<()>,
 }
@@ -427,10 +129,6 @@ impl Launcher {
         #[cfg(target_os = "linux")]
         linux_steamvr::linux_hardware_checks();
 
-        // Must run before driver registration and before SteamVR starts: it
-        // creates/repairs openvrpaths.vrpath for standalone (no Steam) setups.
-        ensure_standalone_openvr_paths();
-
         let alvr_driver_dir = crate::get_filesystem_layout().openvr_driver_root_dir;
 
         // Make sure to unregister any other ALVR driver because it would cause a socket conflict
@@ -445,21 +143,9 @@ impl Launcher {
 
         alvr_server_io::driver_registration(&[alvr_driver_dir], true).ok();
 
-        // Register our bundled official driver so USB mode never depends on an
-        // external Huawei PC VR assistant install. This also removes duplicate
-        // huaweiVR copies that would otherwise share the enable flag.
-        let mut bundled_huawei = std::env::current_exe().unwrap_or_default();
-        bundled_huawei.pop();
-        bundled_huawei.push("huawei-driver");
-        if let Err(err) = alvr_server_io::register_bundled_huawei_driver(&bundled_huawei) {
-            warn!("Failed to register bundled Huawei driver: {err:?}");
-        }
-
         if let Err(err) = unblock_alvr_driver() {
             warn!("Failed to unblock ALVR driver: {:?}", err);
         }
-
-        apply_auto_driver_selection();
 
         #[cfg(target_os = "linux")]
         {
@@ -474,7 +160,7 @@ impl Launcher {
             debug!("SteamVR is dead. Launching...");
 
             #[cfg(windows)]
-            windows_steamvr::start_steamvr(&manual_steamvr_path());
+            windows_steamvr::start_steamvr();
 
             #[cfg(target_os = "linux")]
             linux_steamvr::start_steamvr();

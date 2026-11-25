@@ -4,8 +4,6 @@ mod drawer;
 use self::components::{
     DevicesTab, LogsTab, NotificationBar, SettingsTab, SetupWizard, SetupWizardRequest,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use self::components::WiredDisplayTab;
 use crate::{
     dashboard::components::{CloseAction, NewVersionPopup, StatisticsTab},
     icons, DataSources,
@@ -20,10 +18,6 @@ use std::sync::Arc;
 
 const THEME_STORAGE_KEY: &str = "huawei_dashboard_theme";
 const DRAWER_STORAGE_KEY: &str = "huawei_dashboard_drawer";
-#[cfg(not(target_arch = "wasm32"))]
-const STEAMVR_PATH_STORAGE_KEY: &str = "huawei_dashboard_steamvr_path";
-#[cfg(not(target_arch = "wasm32"))]
-const STEAM_ROOT_STORAGE_KEY: &str = "huawei_dashboard_steam_root";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum DashboardTheme {
@@ -67,10 +61,6 @@ enum Tab {
     Statistics,
     Settings,
     #[cfg(not(target_arch = "wasm32"))]
-    GameLibrary,
-    #[cfg(not(target_arch = "wasm32"))]
-    WiredDisplay,
-    #[cfg(not(target_arch = "wasm32"))]
     Installation,
     Logs,
     Debug,
@@ -81,10 +71,6 @@ const TABS: &[Tab] = &[
     Tab::Devices,
     Tab::Statistics,
     Tab::Settings,
-    #[cfg(not(target_arch = "wasm32"))]
-    Tab::GameLibrary,
-    #[cfg(not(target_arch = "wasm32"))]
-    Tab::WiredDisplay,
     #[cfg(not(target_arch = "wasm32"))]
     Tab::Installation,
     Tab::Logs,
@@ -99,10 +85,6 @@ impl Tab {
             Self::Statistics => "统计",
             Self::Settings => "设置",
             #[cfg(not(target_arch = "wasm32"))]
-            Self::GameLibrary => "游戏库",
-            #[cfg(not(target_arch = "wasm32"))]
-            Self::WiredDisplay => "有线投屏",
-            #[cfg(not(target_arch = "wasm32"))]
             Self::Installation => "安装",
             Self::Logs => "日志",
             Self::Debug => "调试",
@@ -116,10 +98,6 @@ impl Tab {
             Self::Statistics => "查看串流性能与网络状态",
             Self::Settings => "调整画质、延迟、音频与追踪",
             #[cfg(not(target_arch = "wasm32"))]
-            Self::GameLibrary => "设置 SteamVR 路径、免 Steam 直接启动游戏",
-            #[cfg(not(target_arch = "wasm32"))]
-            Self::WiredDisplay => "眼镜直插 PC：桌面画面投进眼镜（曲面/3D/头动）",
-            #[cfg(not(target_arch = "wasm32"))]
             Self::Installation => "维护 SteamVR 驱动与防火墙规则",
             Self::Logs => "查看运行日志与诊断信息",
             Self::Debug => "检查追踪、按键与触觉事件",
@@ -132,10 +110,6 @@ impl Tab {
             Self::Devices => icons::DEVICES,
             Self::Statistics => icons::MONITORING,
             Self::Settings => icons::SETTINGS,
-            #[cfg(not(target_arch = "wasm32"))]
-            Self::GameLibrary => icons::INSTALL_DESKTOP,
-            #[cfg(not(target_arch = "wasm32"))]
-            Self::WiredDisplay => icons::MONITORING,
             #[cfg(not(target_arch = "wasm32"))]
             Self::Installation => icons::INSTALL_DESKTOP,
             Self::Logs => icons::DESCRIPTION,
@@ -159,10 +133,6 @@ pub struct Dashboard {
     statistics_tab: StatisticsTab,
     settings_tab: SettingsTab,
     #[cfg(not(target_arch = "wasm32"))]
-    game_library_tab: components::GameLibraryTab,
-    #[cfg(not(target_arch = "wasm32"))]
-    wired_display_tab: WiredDisplayTab,
-    #[cfg(not(target_arch = "wasm32"))]
     installation_tab: components::InstallationTab,
     logs_tab: LogsTab,
     notification_bar: NotificationBar,
@@ -170,25 +140,10 @@ pub struct Dashboard {
     new_version_popup: Option<components::NewVersionPopup>,
     setup_wizard_open: bool,
     session: Option<SessionConfig>,
-    /// Periodic auto-switch: remember last glasses-on-PC state so the dashboard
-    /// can re-run driver install/switch when the USB/wireless link changes,
-    /// even without the external watcher process running.
-    #[cfg(not(target_arch = "wasm32"))]
-    last_glasses_on_pc: Option<bool>,
-    #[cfg(not(target_arch = "wasm32"))]
-    last_driver_check: Option<std::time::Instant>,
 }
 
 impl Dashboard {
     pub fn new(creation_context: &eframe::CreationContext<'_>, data_sources: DataSources) -> Self {
-        // Auto-install / auto-switch the OpenVR drivers as soon as the
-        // dashboard starts. This makes "just open the dashboard" install the
-        // driver matching the current USB/wireless connection. The server_io
-        // helpers ignore temp package paths, so launching from a build dir is
-        // harmless. Cheap and idempotent.
-        #[cfg(not(target_arch = "wasm32"))]
-        crate::steamvr_launcher::ensure_drivers_installed();
-
         let dashboard_theme = creation_context
             .storage
             .and_then(|storage| storage.get_string(THEME_STORAGE_KEY))
@@ -214,30 +169,6 @@ impl Dashboard {
 
         data_sources.request(ServerRequest::GetSession);
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let (steamvr_path, steam_root) = {
-            let mut steamvr_path = creation_context
-                .storage
-                .and_then(|storage| storage.get_string(STEAMVR_PATH_STORAGE_KEY))
-                .unwrap_or_default();
-            let steam_root = creation_context
-                .storage
-                .and_then(|storage| storage.get_string(STEAM_ROOT_STORAGE_KEY))
-                .unwrap_or_default();
-
-            // The sidecar file written by main() is the authoritative store.
-            // Only overwrite it when the UI storage actually has a value;
-            // otherwise an empty storage would wipe the persisted path and the
-            // user would have to set the SteamVR path on every launch.
-            if steamvr_path.trim().is_empty() {
-                steamvr_path = crate::steamvr_launcher::manual_steamvr_path();
-            } else {
-                crate::steamvr_launcher::set_manual_steamvr_path(steamvr_path.clone());
-            }
-
-            (steamvr_path, steam_root)
-        };
-
         Self {
             data_sources,
             just_opened: true,
@@ -252,10 +183,6 @@ impl Dashboard {
             statistics_tab: StatisticsTab::new(),
             settings_tab: SettingsTab::new(),
             #[cfg(not(target_arch = "wasm32"))]
-            game_library_tab: components::GameLibraryTab::new(steamvr_path, steam_root),
-            #[cfg(not(target_arch = "wasm32"))]
-            wired_display_tab: WiredDisplayTab::new(),
-            #[cfg(not(target_arch = "wasm32"))]
             installation_tab: components::InstallationTab::new(),
             logs_tab: LogsTab::new(),
             notification_bar: NotificationBar::new(),
@@ -263,10 +190,6 @@ impl Dashboard {
             setup_wizard_open: false,
             session: None,
             new_version_popup: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            last_glasses_on_pc: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            last_driver_check: None,
         }
     }
 
@@ -318,20 +241,6 @@ impl Dashboard {
 impl eframe::App for Dashboard {
     fn update(&mut self, context: &egui::Context, _: &mut eframe::Frame) {
         let mut requests = vec![];
-
-        // Periodic USB/wireless auto-switch (independent of the external
-        // watcher process). Check at most once every 3 seconds.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let due = self
-                .last_driver_check
-                .map(|t| t.elapsed() >= std::time::Duration::from_secs(3))
-                .unwrap_or(true);
-            if due {
-                crate::steamvr_launcher::auto_switch_if_needed(&mut self.last_glasses_on_pc);
-                self.last_driver_check = Some(std::time::Instant::now());
-            }
-        }
 
         let resolved_dark_mode = self.theme.resolved_is_dark(context);
         if resolved_dark_mode != self.applied_dark_mode {
@@ -546,14 +455,6 @@ impl eframe::App for Dashboard {
                                 }
                             }
                             #[cfg(not(target_arch = "wasm32"))]
-                            Tab::GameLibrary => {
-                                self.game_library_tab.ui(ui);
-                            }
-                            #[cfg(not(target_arch = "wasm32"))]
-                            Tab::WiredDisplay => {
-                                self.wired_display_tab.ui(ui);
-                            }
-                            #[cfg(not(target_arch = "wasm32"))]
                             Tab::Installation => {
                                 for request in self.installation_tab.ui(ui) {
                                     match request {
@@ -619,13 +520,5 @@ impl eframe::App for Dashboard {
                 "collapsed".into()
             },
         );
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            storage.set_string(
-                STEAMVR_PATH_STORAGE_KEY,
-                self.game_library_tab.steamvr_path(),
-            );
-            storage.set_string(STEAM_ROOT_STORAGE_KEY, self.game_library_tab.steam_root());
-        }
     }
 }

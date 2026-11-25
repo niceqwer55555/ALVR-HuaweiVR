@@ -73,6 +73,3 @@ CMakeLists.txt
 cmake-build-debug/
 
 *.jks
-# auto-vr watcher runtime state
-auto_vr_state.txt
-auto_vr_watcher.log

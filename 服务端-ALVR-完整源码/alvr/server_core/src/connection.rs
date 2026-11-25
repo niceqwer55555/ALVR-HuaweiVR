@@ -158,8 +158,6 @@ pub fn contruct_openvr_config(session: &SessionConfig) -> OpenvrConfig {
         false
     };
 
-    let cast = settings.headset.cast.clone().into_option();
-
     let nvenc_overrides = settings.video.encoder_config.nvenc;
     let amf_controls = settings.video.encoder_config.amf;
     let hdr_controls = settings.video.encoder_config.hdr;
@@ -190,17 +188,6 @@ pub fn contruct_openvr_config(session: &SessionConfig) -> OpenvrConfig {
             .software
             .force_software_encoding,
         sw_thread_count: settings.video.encoder_config.software.thread_count,
-        cast_mode: cast.is_some(),
-        cast_monitor_index: cast.as_ref().map(|c| c.monitor_index as i64).unwrap_or(0),
-        cast_screen_size_percent: cast
-            .as_ref()
-            .map(|c| (c.screen_size.clamp(0.05, 1.0) * 100.0) as i64)
-            .unwrap_or(90),
-        cast_stereo_separation_px: cast
-            .as_ref()
-            .map(|c| c.stereo_separation_px as i64)
-            .unwrap_or(0),
-        cast_capture_fps: cast.as_ref().map(|c| c.capture_fps as i64).unwrap_or(60),
         controllers_enabled,
         controller_is_tracker,
         body_tracking_vive_enabled,
@@ -312,26 +299,12 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
             let stream_port;
             let client_type;
             let client_autolaunch;
-            let wireless_candidates: Vec<String>;
             {
                 let session_manager_lock = SESSION_MANAGER.read();
                 let connection = &session_manager_lock.settings().connection;
                 stream_port = connection.stream_port;
                 client_type = connection.wired_client_type.clone();
                 client_autolaunch = connection.wired_client_autolaunch;
-
-                // Trusted clients' manual IPs double as wireless adb targets:
-                // when no USB phone is attached the wired flow tries
-                // `adb connect <ip>:5555` there, and port forwarding works
-                // exactly the same over WiFi.
-                wireless_candidates = session_manager_lock
-                    .client_list()
-                    .iter()
-                    .filter(|(hostname, info)| {
-                        info.trusted && hostname.as_str() != WIRED_CLIENT_HOSTNAME
-                    })
-                    .flat_map(|(_, info)| info.manual_ips.iter().map(|ip| ip.to_string()))
-                    .collect();
             }
 
             let status = match wired_connection.setup(
@@ -339,7 +312,6 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
                 stream_port,
                 &client_type,
                 client_autolaunch,
-                &wireless_candidates,
             ) {
                 Ok(status) => status,
                 Err(e) => {
@@ -643,45 +615,24 @@ fn connection_pipeline(
     );
 
     let fps = {
-        let preferred_fps = initial_settings.video.preferred_fps;
-
         let mut best_match = 0_f32;
         let mut min_diff = f32::MAX;
         for rate in &streaming_caps.supported_refresh_rates {
-            let diff = (*rate - preferred_fps).abs();
+            let diff = (*rate - initial_settings.video.preferred_fps).abs();
             if diff < min_diff {
                 best_match = *rate;
                 min_diff = diff;
             }
         }
-
-        // The Huawei client binary cannot be rebuilt from source any more: the shipped .so is a
-        // black box that advertises a single 70Hz rate. Snapping back up to it would force the
-        // encoder to produce 70fps on a machine that can only afford a fraction of that, so a
-        // preferred_fps below every advertised rate is honoured instead.
-        let below_all_rates = preferred_fps > 0.0
-            && !streaming_caps.supported_refresh_rates.is_empty()
-            && streaming_caps
-                .supported_refresh_rates
-                .iter()
-                .all(|rate| *rate > preferred_fps);
-
-        if below_all_rates {
-            warn!(
-                "Encoding at {preferred_fps}Hz, below every rate the client advertises ({:?})",
-                streaming_caps.supported_refresh_rates
-            );
-            preferred_fps
-        } else {
-            if !streaming_caps
-                .supported_refresh_rates
-                .contains(&preferred_fps)
-            {
-                warn!("Chosen refresh rate not supported. Using {best_match}Hz");
-            }
-            best_match
-        }
+        best_match
     };
+
+    if !streaming_caps
+        .supported_refresh_rates
+        .contains(&initial_settings.video.preferred_fps)
+    {
+        warn!("Chosen refresh rate not supported. Using {fps}Hz");
+    }
 
     let enable_foveated_encoding =
         if let Switch::Enabled(config) = &initial_settings.video.foveated_encoding {
