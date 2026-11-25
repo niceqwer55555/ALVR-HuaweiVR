@@ -1,0 +1,197 @@
+use super::HuaweiDriverPanel;
+use crate::icons;
+use alvr_packets::{FirewallRulesAction, ServerRequest};
+use eframe::{
+    egui::{Button, Label, Layout, RichText, Ui},
+    emath::Align,
+};
+
+pub enum SetupWizardRequest {
+    ServerRequest(ServerRequest),
+    Close { finished: bool },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Welcome = 0,
+    ResetSettings = 1,
+    HardwareRequirements = 2,
+    HardwareDrivers = 3,
+    SoftwareRequirements = 4,
+    Firewall = 5,
+    Recommendations = 6,
+    Finished = 7,
+}
+
+fn index_to_page(index: usize) -> Page {
+    match index {
+        0 => Page::Welcome,
+        1 => Page::ResetSettings,
+        2 => Page::HardwareRequirements,
+        3 => Page::HardwareDrivers,
+        4 => Page::SoftwareRequirements,
+        5 => Page::Firewall,
+        6 => Page::Recommendations,
+        7 => Page::Finished,
+        _ => panic!("Invalid page index"),
+    }
+}
+
+fn page_content(
+    ui: &mut Ui,
+    subtitle: &str,
+    paragraph: &str,
+    interactible_content: impl FnMut(&mut Ui),
+) {
+    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+        ui.add_space(60.0);
+        ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+            ui.add_space(60.0);
+            ui.with_layout(Layout::top_down(Align::LEFT), |ui| {
+                ui.add_space(15.0);
+                ui.heading(RichText::new(subtitle).size(20.0));
+                ui.add(Label::new(RichText::new(paragraph).size(14.0)).wrap());
+                ui.add_space(30.0);
+                ui.vertical_centered(interactible_content);
+            });
+        })
+    });
+}
+
+pub struct SetupWizard {
+    page: Page,
+    drivers: HuaweiDriverPanel,
+}
+
+impl SetupWizard {
+    pub fn new() -> Self {
+        Self {
+            page: Page::Welcome,
+            drivers: HuaweiDriverPanel::new(),
+        }
+    }
+
+    pub fn ui(&mut self, ui: &mut Ui) -> Option<SetupWizardRequest> {
+        let mut request = None;
+
+        ui.horizontal(|ui| {
+            ui.add_space(60.0);
+            ui.vertical(|ui| {
+                ui.add_space(30.0);
+                ui.heading(RichText::new("欢迎使用 ALVR 华为专版").size(30.0));
+                ui.add_space(5.0);
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(15.0);
+                if ui
+                    .add(Button::new(icons::symbol_auto(icons::CLOSE, 19.0)))
+                    .on_hover_text("关闭设置向导")
+                    .clicked()
+                {
+                    request = Some(SetupWizardRequest::Close { finished: false });
+                }
+            })
+        });
+        ui.separator();
+        match self.page {
+            Page::Welcome => page_content(
+                ui,
+                "此向导将帮助你完成 ALVR 的基础设置。",
+                "",
+                |_| (),
+            ),
+            Page::ResetSettings => page_content(
+                ui,
+                "重置设置",
+                "更新 ALVR 后建议重置一次设置。",
+                |ui| {
+                    if ui.button("重置设置").clicked() {
+                        request = Some(SetupWizardRequest::ServerRequest(
+                            ServerRequest::UpdateSession(Box::default()),
+                        ));
+                    }
+                },
+            ),
+            Page::HardwareRequirements => page_content(
+                ui,
+                "硬件要求",
+                "ALVR 需要较新的独立显卡，低端 Intel 集成显卡可能无法使用。\n请确认系统至少有一个音频输出设备。",
+                |_| (),
+            ),
+            Page::HardwareDrivers => page_content(
+                ui,
+                "华为硬件驱动",
+                "眼镜在设备管理器里是三类设备：DisplayPort 显示器、USB 复合设备（IMU/按键）和可选的虚拟显示器。\n\
+                 新机器或设备带黄色感叹号时，在这里一次装完；装完仍异常就拔插一次 USB-C。",
+                |ui| self.drivers.ui(ui),
+            ),
+            Page::SoftwareRequirements => page_content(
+                ui,
+                "软件要求",
+                if cfg!(windows) {
+                    "要在 Windows 上传输头显麦克风声音，需要安装 Virtual Audio Cable、VB-Cable 或 Voicemeeter。"
+                } else if cfg!(target_os = "linux") {
+                    "需要 PipeWire 0.3.49 或更高版本才能串流音频并使用麦克风。"
+                } else {
+                    "不支持的操作系统"
+                },
+                #[allow(unused_variables)]
+                |ui| {
+                    #[cfg(windows)]
+                    if ui.button("下载 Virtual Audio Cable（精简版）").clicked() {
+                        ui.ctx().open_url(eframe::egui::OpenUrl::same_tab(
+                            "https://software.muzychenko.net/freeware/vac470lite.zip",
+                        ));
+                    }
+                },
+            ),
+            Page::Firewall => page_content(
+                ui,
+                "防火墙",
+                "与头显通信需要配置防火墙规则。\n此操作需要管理员权限！",
+                |ui| {
+                    if ui.button("添加防火墙规则").clicked() {
+                        request = Some(SetupWizardRequest::ServerRequest(
+                            ServerRequest::FirewallRules(FirewallRulesAction::Add),
+                        ));
+                    }
+                },
+            ),
+            Page::Recommendations => page_content(
+                ui,
+                "建议",
+                "ALVR 支持多种 PC 硬件和头显，但默认设置不一定适合所有设备。若体验不理想，请尝试调整分辨率、码率、编码器等选项。",
+                |_| (),
+            ),
+            Page::Finished => page_content(
+                ui,
+                "完成",
+                "以后可随时从左侧“安装”页重新运行此设置向导。",
+                |_| (),
+            ),
+        };
+
+        ui.with_layout(Layout::bottom_up(Align::RIGHT), |ui| {
+            ui.add_space(30.0);
+            ui.horizontal(|ui| {
+                ui.add_space(15.0);
+                if self.page == Page::Finished {
+                    if ui.button("完成").clicked() {
+                        request = Some(SetupWizardRequest::Close { finished: true });
+                    }
+                } else if ui.button("下一步").clicked() {
+                    self.page = index_to_page(self.page as usize + 1);
+                }
+                if ui
+                    .add_visible(self.page != Page::Welcome, Button::new("上一步"))
+                    .clicked()
+                {
+                    self.page = index_to_page(self.page as usize - 1);
+                }
+            });
+            ui.separator();
+        });
+
+        request
+    }
+}

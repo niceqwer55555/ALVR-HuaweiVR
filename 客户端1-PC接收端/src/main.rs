@@ -83,6 +83,12 @@ fn load_config(path: &str) -> ClientConfig {
     if let Some(f) = v["target_fps"].as_f64() { cfg.target_fps = f as f32; }
     if let Some(p) = v["ipd_m"].as_f64() { cfg.ipd_m = p as f32; }
     if let Some(port) = v["stream_port"].as_u64() { cfg.stream_port = port as u16; }
+    if let Some(p) = v["stream_protocol"].as_str() {
+        cfg.stream_protocol = match p.to_lowercase().as_str() {
+            "tcp" | "udp" | "auto" => p.to_lowercase(),
+            _ => "auto".into(),
+        };
+    }
     if let Some(layout) = v["stereo_layout"].as_str() {
         cfg.stereo_layout = match layout.to_lowercase().as_str() {
             "tb" | "topbottom" => 1,

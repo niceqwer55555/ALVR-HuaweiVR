@@ -15,7 +15,7 @@
 
 | 项 | 状态 |
 |---|---|
-| ALVR v20.14.1 线协议（发现/握手/控制/流/tracking） | ✅ 自包含重写，`cargo test` 18/18 通过 |
+| ALVR v20.14.1 线协议（发现/握手/控制/流/tracking） | ✅ 已对齐服务端分片/粘包/能力集，`cargo test` 24/24 通过 |
 | H.264 Annex B → BGRA 解码（FFmpeg 管道） | ✅ 实现并通过参数/尺寸单测 |
 | 本地回环帧输出 + IMU 姿态输入 | ✅ 实现并通过 UDP 回环集成测试 |
 | 头显/手机状态 + 电池显示 + Battery 回传 | ✅ 实现，`--status` 可用，4 项单测通过 |
@@ -49,6 +49,16 @@ hvr-alvr-win-sink/
 └── verify.sh                  # 交付自检
 ```
 
+## 2026-11-25 协议与几何修复
+
+- 分片长度字段改为服务端语义 `4 + payload_len`（旧代码多算 14 字节，第一片就错位）。
+- 控制通道 `ctl_buf` 跨调用保留，`StreamConfig`/`DecoderConfig`/`StartStream` 粘包不再丢包。
+- 重组器按 `stream_id` 分桶，音频/统计分片不再冲掉视频重组。
+- 流通道按 `stream_protocol`/`wired`/session 选择 TCP 或 UDP，并使用 session 的 `stream_port`。
+- 能力集发送完整 JSON，显式关闭 AV1/10-bit/foveated；`codec` 改为上游 `CodecType` 枚举。
+- FOV 用服务端语义的半角**弧度** `±0.829`（47.5°，tan=1.0913），修正旧配置四个正值导致投影边界反向；IPD 63 mm；渲染器 ini 的 `fov_tan` 仍为 1.0913。
+- Windows core 已按新源码重新交叉编译，`产物/客户端-PC/hvr-alvr-win-sink.exe` 为 1.5 MB 新版。
+
 ## 快速开始
 
 ```powershell
@@ -69,7 +79,7 @@ hvr-alvr-win-sink.exe
 
 1. **3DoF**：只读 IMU 朝向，无位置追踪（华为 SLAM 私有不可逆向）。
 2. **手柄未实现**：聚焦"画面能看、头动能跟"。
-3. **渲染器需打补丁**：上游 HwVRDesktop 默认采集桌面，按 `docs/04` 改成收网络帧。
+3. **渲染器需使用网络收帧版**：上游 HwVRDesktop 默认采集桌面；本包 `renderer/HwVRDesktop.exe` 已是 patch 版，ini 需保持 `[s3d] mode=1`、`ipd=63`、`fov_tan=1.0913`。
 4. **无法在本环境真机验证**：Rust 侧已充分自测；Windows 渲染/眼镜点亮需你验证。
 
 ## 来源与依据

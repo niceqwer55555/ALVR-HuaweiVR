@@ -15,7 +15,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const FRAME_PORT: u16 = 9911;
 pub const POSE_PORT: u16 = 9912;
@@ -24,6 +24,7 @@ pub const POSE_PORT: u16 = 9912;
 pub struct FrameOutput {
     stream: Option<TcpStream>,
     connected: bool,
+    last_attempt: Instant,
 }
 
 impl FrameOutput {
@@ -35,7 +36,7 @@ impl FrameOutput {
         )
         .ok();
         let connected = stream.is_some();
-        Self { stream, connected }
+        Self { stream, connected, last_attempt: Instant::now() }
     }
 
     pub fn is_connected(&self) -> bool { self.connected }
@@ -43,13 +44,18 @@ impl FrameOutput {
     /// 发送一帧。返回 false 表示渲染器未连接（帧被丢弃，不阻塞解码）。
     pub fn send_frame(&mut self, bgra: &[u8], w: u32, h: u32, layout: u32) -> bool {
         if self.stream.is_none() {
-            // 每 2 秒重试连接一次（渲染器可能后启动）
-            if let Ok(s) = TcpStream::connect_timeout(
-                &format!("127.0.0.1:{FRAME_PORT}").parse().unwrap(),
-                Duration::from_millis(100),
-            ) {
-                self.stream = Some(s);
-                self.connected = true;
+            // 每 2 秒重试一次；旧实现每帧重试，渲染器未启动时每帧阻塞 100ms
+            if self.last_attempt.elapsed() >= Duration::from_secs(2) {
+                self.last_attempt = Instant::now();
+                if let Ok(s) = TcpStream::connect_timeout(
+                    &format!("127.0.0.1:{FRAME_PORT}").parse().unwrap(),
+                    Duration::from_millis(100),
+                ) {
+                    self.stream = Some(s);
+                    self.connected = true;
+                } else {
+                    return false;
+                }
             } else {
                 return false;
             }

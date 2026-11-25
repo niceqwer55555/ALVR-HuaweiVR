@@ -9,8 +9,9 @@
 //! - 控制通道（TCP 9943，客户端 listen、server 连入）：
 //!     每帧 = [u32 payload 长度 BE][bincode(payload)]
 //! - 流通道（客户端另起 TCP/UDP listen，server 连入）：
-//!     每分片 = [u32 负载长度 BE][u16 流ID][u32 包序号][u32 分片总数][u32 分片序号][header(bincode)][data]
-//!     其中 u32 负载长度字段本身不计入长度（= 后续所有字节数）。
+//!     每分片 = [u32 分片长度-4 BE][u16 流ID][u32 包序号][u32 分片总数][u32 分片序号][header(bincode)][data]
+//!     长度字段 = 整个分片长度 - 4（与上游 stream_socket.rs 的 packet_length - 4 一致），
+//!     因此分片总长 = 4 + 字段值，不是 18 + 字段值。
 
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
@@ -113,9 +114,18 @@ impl NegotiatedConfig {
     }
 }
 
+/// 与上游 alvr_session::CodecType 的变体顺序一致；bincode 按变体序号编码，
+/// 不是字符串，写成 String 会导致 DecoderConfig 反序列化错位。
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodecType {
+    H264,
+    Hevc,
+    AV1,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DecoderInitializationConfig {
-    pub codec: String, // CodecType: "H264" / "AV1" / "VP9"（serde 外部标记）
+    pub codec: CodecType,
     pub config_buffer: Vec<u8>,
 }
 
@@ -220,7 +230,9 @@ pub struct DeviceMotion {
 pub struct Tracking {
     pub target_timestamp: Duration,
     pub device_motions: Vec<(u64, DeviceMotion)>,
-    pub hand_skeletons: [Option<[[f32; 4]; 26]>; 2],
+    /// 上游类型是 [Option<[Pose; 26]>; 2]，Pose 为 7 个 f32（四元数+位置）。
+    /// 写成 [[f32;4];26] 会在 Some 时改变 bincode 大小。
+    pub hand_skeletons: [Option<[Pose; 26]>; 2],
     pub face_data: FaceData,
 }
 
@@ -272,7 +284,8 @@ pub const SHARD_PREFIX_SIZE: usize = 4 + 2 + 4 + 4 + 4;
 
 #[derive(Debug)]
 pub struct ShardHeader {
-    pub payload_len: usize, // 前缀之后所有字节数（含 header + data）
+    /// 线上长度字段，等于「整个分片长度 - 4」，不是前缀之后的字节数
+    pub payload_len: usize,
     pub stream_id: u16,
     pub packet_index: u32,
     pub shards_count: usize,
@@ -292,6 +305,12 @@ impl ShardHeader {
             shards_count: u32::from_be_bytes(buf[10..14].try_into().unwrap()) as usize,
             shard_index: u32::from_be_bytes(buf[14..18].try_into().unwrap()) as usize,
         })
+    }
+
+    /// 整个分片的字节数（含 18 字节前缀）
+    pub fn total_len(&self) -> usize {
+        // 上游发送：packet_length - 4 -> 长度字段；因此 packet_length = 4 + 字段
+        4 + self.payload_len
     }
 }
 
@@ -348,6 +367,7 @@ mod tests {
         b[14..18].copy_from_slice(&1u32.to_be_bytes());
         let h = ShardHeader::parse(&b).unwrap();
         assert_eq!(h.payload_len, 1200);
+        assert_eq!(h.total_len(), 1204, "total_len 必须是 4 + 长度字段");
         assert_eq!(h.stream_id, STREAM_VIDEO);
         assert_eq!(h.packet_index, 7);
         assert_eq!(h.shards_count, 3);

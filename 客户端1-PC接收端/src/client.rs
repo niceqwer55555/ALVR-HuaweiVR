@@ -32,6 +32,8 @@ pub struct ClientConfig {
     pub refresh_rates: Vec<f32>,
     pub microphone_sample_rate: u32,
     pub stream_port: u16,
+    /// auto / tcp / udp；auto 时按服务端 session 的 connection.stream_protocol 协商
+    pub stream_protocol: String,
     pub protocol_id_u64: u64,
     pub target_fps: f32,
     pub ipd_m: f32,
@@ -49,16 +51,82 @@ impl Default for ClientConfig {
             refresh_rates: vec![70.0, 72.0],
             microphone_sample_rate: 48000,
             stream_port: 9944,
+            stream_protocol: "auto".into(),
             // 上游 alvr_common::protocol_id_u64() = hash_string("20")（Rust DefaultHasher/SipHash），
             // 不是字面量 20。发错值服务端会 warn「incompatible client」，华为版虽不拒绝但应如实上报。
             protocol_id_u64: 1_686_174_404_061_257_063,
             target_fps: 70.0,
             ipd_m: 0.063,
+            // AlvrFov 是「半角弧度」，服务端会再做 tanf()：
+            // 95° 每眼 → 半角 47.5° = 0.829 rad，tan(47.5°)=1.0913（渲染器 ini 用后者）。
             fov: [
-                Fov { left: 0.829, right: 0.829, up: 0.829, down: 0.829 },
-                Fov { left: 0.829, right: 0.829, up: 0.829, down: 0.829 },
+                Fov { left: -0.829, right: 0.829, up: 0.829, down: -0.829 },
+                Fov { left: -0.829, right: 0.829, up: 0.829, down: -0.829 },
             ],
             stereo_layout: 0,
+        }
+    }
+}
+
+/// StreamConfigPacket.session 是 SessionConfig 的 JSON；只取流通道相关字段。
+/// 结构：{"session_settings":{"connection":{"stream_protocol":{"variant":"Tcp"},
+/// "stream_port":9944}}}
+#[derive(Debug, Clone)]
+struct SessionInfo {
+    stream_protocol: String,
+    stream_port: Option<u16>,
+}
+
+impl SessionInfo {
+    fn parse(s: &str) -> Self {
+        let v: serde_json::Value = serde_json::from_str(s).unwrap_or(serde_json::Value::Null);
+        let conn = v.pointer("/session_settings/connection");
+        let stream_protocol = conn
+            .and_then(|c| c.pointer("/stream_protocol/variant"))
+            .and_then(|x| x.as_str())
+            .or_else(|| conn.and_then(|c| c.pointer("/stream_protocol")).and_then(|x| x.as_str()))
+            .unwrap_or("Tcp")
+            .to_string();
+        let stream_port = conn
+            .and_then(|c| c.get("stream_port"))
+            .and_then(|x| x.as_u64())
+            .map(|x| x as u16);
+        Self { stream_protocol, stream_port }
+    }
+}
+
+/// 流通道抽象：TCP 面向字节流，UDP 面向分片数据报；上层解析逻辑一致。
+enum StreamChannel {
+    Tcp(TcpStream),
+    Udp(UdpSocket),
+}
+
+impl StreamChannel {
+    fn set_read_timeout(&self, timeout: Duration) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(s) => s.set_read_timeout(Some(timeout)),
+            Self::Udp(s) => s.set_read_timeout(Some(timeout)),
+        }
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(s) => s.read(buf),
+            Self::Udp(s) => s.recv(buf),
+        }
+    }
+
+    fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(s) => s.write_all(data),
+            Self::Udp(s) => {
+                let n = s.send(data)?;
+                if n != data.len() {
+                    Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "UDP 分片未完整发送"))
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 }
@@ -119,6 +187,36 @@ where
     summary
 }
 
+/// 按上游 encode_video_streaming_capabilities 的规则：
+/// 正数 refresh rate 照常放在前面，完整能力 JSON 的每个字节以负 f32 追加。
+/// 不追加 JSON 时服务端会按 Null 解码，默认 encoder_av1/10bit/foveated=true，
+/// 与实际只支持 H.264 8-bit 的解码器不符。
+fn build_capabilities(cfg: &ClientConfig) -> VideoStreamingCapabilitiesLegacy {
+    let caps_json = serde_json::json!({
+        "default_view_resolution": cfg.view_resolution,
+        "supported_refresh_rates": cfg.refresh_rates,
+        "microphone_sample_rate": cfg.microphone_sample_rate,
+        "supports_foveated_encoding": false,
+        "encoder_high_profile": true,
+        "encoder_10_bits": false,
+        "encoder_av1": false,
+        "multimodal_protocol": false,
+        "prefer_10bit": false,
+        "prefer_full_range": true,
+        "preferred_encoding_gamma": 2.2,
+        "prefer_hdr": false
+    });
+    let mut rates = cfg.refresh_rates.clone();
+    for b in serde_json::to_string(&caps_json).unwrap_or_default().bytes() {
+        rates.push(-(b as f32));
+    }
+    VideoStreamingCapabilitiesLegacy {
+        default_view_resolution: cfg.view_resolution,
+        supported_refresh_rates_plus_extra_data: rates,
+        microphone_sample_rate: cfg.microphone_sample_rate,
+    }
+}
+
 fn one_session<F, P, B>(
     cfg: &ClientConfig,
     on_frame: &mut F,
@@ -171,24 +269,20 @@ where
     eprintln!("[hvr-sink] 已连接串流端 {server_ip}");
     status::set_alvr_connected(true); // 控制通道连上即点亮 GUI 的 ALVR 串流灯
 
-    // 3) 发送 ConnectionAccepted（含能力集）
-    let caps = VideoStreamingCapabilitiesLegacy {
-        default_view_resolution: cfg.view_resolution,
-        supported_refresh_rates_plus_extra_data: cfg.refresh_rates.clone(),
-        microphone_sample_rate: cfg.microphone_sample_rate,
-    };
+    // 3) 发送 ConnectionAccepted（含完整能力集 JSON，见 build_capabilities）
     let hello = ClientConnectionResult::ConnectionAccepted {
         client_protocol_id: cfg.protocol_id_u64,
         display_name: cfg.hostname.clone(),
         server_ip,
-        streaming_capabilities: Some(caps),
+        streaming_capabilities: Some(build_capabilities(cfg)),
     };
     control
         .write_all(&control_encode(&hello).map_err(|e| format!("hello 序列化失败: {e}"))?)
         .map_err(|e| format!("发送 hello 失败: {e}"))?;
 
-    // 4) 收 StreamConfigPacket
-    let config = read_control::<StreamConfigPacket>(&mut control, HANDSHAKE_TIMEOUT)?;
+    // 4) 收 StreamConfigPacket。ctl_buf 必须跨调用保留，否则粘包会吞掉 StartStream。
+    let mut ctl_buf: Vec<u8> = Vec::with_capacity(4096);
+    let config = read_control::<StreamConfigPacket>(&mut control, &mut ctl_buf, HANDSHAKE_TIMEOUT)?;
     let negotiated = NegotiatedConfig::from_json(&config.negotiated)
         .map_err(|e| format!("解析协商配置失败: {e}"))?;
     eprintln!(
@@ -199,11 +293,11 @@ where
         negotiated.wired
     );
 
-    // 5) 等 StartStream / DecoderConfig
+    // 5) 等 StartStream / DecoderConfig（同一个 ctl_buf，保留后续粘包）
     let mut decoder_config: Option<DecoderInitializationConfig> = None;
     let mut started = false;
     for _ in 0..8 {
-        let pkt = read_control::<ServerControlPacket>(&mut control, HANDSHAKE_TIMEOUT)?;
+        let pkt = read_control::<ServerControlPacket>(&mut control, &mut ctl_buf, HANDSHAKE_TIMEOUT)?;
         match pkt {
             ServerControlPacket::StartStream => { started = true; break; }
             ServerControlPacket::DecoderConfig(c) => decoder_config = Some(c),
@@ -215,33 +309,61 @@ where
         return Err("未收到 StartStream".into());
     }
     if let Some(c) = &decoder_config {
-        eprintln!("[hvr-sink] 解码器配置: codec={} config_buffer={}B", c.codec, c.config_buffer.len());
+        eprintln!(
+            "[hvr-sink] 解码器配置: codec={:?} config_buffer={}B",
+            c.codec, c.config_buffer.len()
+        );
     }
 
-    // 6) 建立流通道监听（上游 StreamSocketBuilder::listen_for_server）
-    let stream_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, cfg.stream_port))
-        .map_err(|e| format!("绑定流端口 {} 失败: {e}", cfg.stream_port))?;
-    stream_listener.set_nonblocking(true).ok();
+    // 6) 流通道协议/端口以服务端 session 为准（ALVR 默认 UDP，wired 才 TCP）
+    let session_info = SessionInfo::parse(&config.session);
+    let protocol = if cfg.stream_protocol.eq_ignore_ascii_case("auto") {
+        if negotiated.wired {
+            "tcp".to_string()
+        } else {
+            session_info.stream_protocol.clone()
+        }
+    } else {
+        cfg.stream_protocol.clone()
+    };
+    let stream_port = session_info.stream_port.unwrap_or(cfg.stream_port);
+    eprintln!(
+        "[hvr-sink] 流通道: {} :{}（session={} wired={}）",
+        protocol.to_uppercase(), stream_port, session_info.stream_protocol, negotiated.wired
+    );
 
-    // 7) 发 StreamReady
     let ready = control_encode(&ClientControlPacket::StreamReady)
         .map_err(|e| format!("StreamReady 序列化: {e}"))?;
-    control.write_all(&ready).map_err(|e| format!("发送 StreamReady: {e}"))?;
 
-    // 8) 等 server 连流通道
-    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    let mut stream: Option<TcpStream> = None;
-    while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
-        match stream_listener.accept() {
-            Ok((s, addr)) => { stream = Some(s); eprintln!("[hvr-sink] 流通道已连接 {addr}"); break; }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(20));
+    // 7) 按协议建流通道，再发 StreamReady
+    let mut stream: StreamChannel = if protocol.eq_ignore_ascii_case("udp") {
+        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, stream_port))
+            .map_err(|e| format!("绑定 UDP 流端口 {stream_port} 失败: {e}"))?;
+        sock.connect((server_ip, stream_port))
+            .map_err(|e| format!("UDP 连接服务端 {server_ip}:{stream_port} 失败: {e}"))?;
+        control.write_all(&ready).map_err(|e| format!("发送 StreamReady: {e}"))?;
+        StreamChannel::Udp(sock)
+    } else {
+        let stream_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, stream_port))
+            .map_err(|e| format!("绑定 TCP 流端口 {stream_port} 失败: {e}"))?;
+        stream_listener.set_nonblocking(true).ok();
+        control.write_all(&ready).map_err(|e| format!("发送 StreamReady: {e}"))?;
+
+        // 8) 等 server 连 TCP 流通道
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut accepted: Option<TcpStream> = None;
+        while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+            match stream_listener.accept() {
+                Ok((s, addr)) => { eprintln!("[hvr-sink] 流通道已连接 {addr}"); accepted = Some(s); break; }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => return Err(format!("流 accept 失败: {e}")),
             }
-            Err(e) => return Err(format!("流 accept 失败: {e}")),
         }
-    }
-    let mut stream = stream.ok_or("流通道连接超时")?;
-    stream.set_read_timeout(Some(Duration::from_millis(500))).ok();
+        StreamChannel::Tcp(accepted.ok_or("流通道连接超时（TCP）")?)
+    };
+    stream.set_read_timeout(Duration::from_millis(500)).ok();
 
     // 9) 发送 ViewsConfig（IPD + FOV），让 server 正确渲染双目
     let views = control_encode(&ClientControlPacket::ViewsConfig(ViewsConfig {
@@ -250,8 +372,34 @@ where
     })).map_err(|e| format!("ViewsConfig: {e}"))?;
     control.write_all(&views).ok();
 
-    // 10) 主循环：收视频分片重组 + 定时回传 tracking + keepalive
-    stream_video_and_track(
+    // 10) 后台持续读控制通道：DecoderConfig / Restarting 不能一直堆在 TCP 缓冲里
+    let mut ctrl_read = control.try_clone().map_err(|e| format!("克隆控制通道: {e}"))?;
+    ctrl_read.set_read_timeout(Some(Duration::from_millis(500))).ok();
+    let ctrl_stop = Arc::new(AtomicBool::new(false));
+    let ctrl_stop_thread = Arc::clone(&ctrl_stop);
+    std::thread::spawn(move || {
+        let mut buf = ctl_buf;
+        while !ctrl_stop_thread.load(Ordering::Relaxed) {
+            match read_control::<ServerControlPacket>(&mut ctrl_read, &mut buf, Duration::from_millis(500)) {
+                Ok(ServerControlPacket::DecoderConfig(c)) => {
+                    eprintln!(
+                        "[hvr-sink] 服务端 DecoderConfig: codec={:?} config_buffer={}B",
+                        c.codec, c.config_buffer.len()
+                    );
+                }
+                Ok(ServerControlPacket::Restarting) => {
+                    eprintln!("[hvr-sink] 服务端要求重启串流");
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) if e == "读取控制包超时" => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    // 11) 主循环：收视频分片重组 + 定时回传 tracking + keepalive
+    let result = stream_video_and_track(
         &mut stream,
         &mut control,
         on_frame,
@@ -260,28 +408,31 @@ where
         stop,
         summary,
         cfg.target_fps,
-    )
+    );
+    ctrl_stop.store(true, Ordering::Relaxed);
+    result
 }
 
 /// 从控制通道读一帧指定类型
 fn read_control<T: serde::de::DeserializeOwned>(
     s: &mut TcpStream,
+    carry: &mut Vec<u8>,
     timeout: Duration,
 ) -> Result<T, String> {
     let deadline = Instant::now() + timeout;
-    let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let mut tmp = [0u8; 8192];
     loop {
-        if buf.len() >= 4 {
-            let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        if carry.len() >= 4 {
+            let len = u32::from_be_bytes([carry[0], carry[1], carry[2], carry[3]]) as usize;
             if len > 16 * 1024 * 1024 {
                 return Err(format!("控制包长度异常: {len}"));
             }
-            if buf.len() >= 4 + len {
-                let (pkt, used) = control_decode::<T>(&buf)
+            if carry.len() >= 4 + len {
+                let (pkt, used) = control_decode::<T>(&carry)
                     .map_err(|e| format!("控制包解析失败: {e:?}"))?
                     .ok_or("控制包不完整")?;
-                let _ = used;
+                // 关键：只消费当前包，保留同一次 read 里粘着的后续包
+                carry.drain(..used);
                 return Ok(pkt);
             }
         }
@@ -290,7 +441,7 @@ fn read_control<T: serde::de::DeserializeOwned>(
         }
         match s.read(&mut tmp) {
             Ok(0) => return Err("控制通道断开".into()),
-            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Ok(n) => carry.extend_from_slice(&tmp[..n]),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -299,44 +450,40 @@ fn read_control<T: serde::de::DeserializeOwned>(
     }
 }
 
-/// 视频分片重组状态
-struct Reassembler {
+/// 单个流的分片重组状态。ALVR 的音频/视频/统计分片可以在同一 socket 里交错，
+/// 必须按 stream_id 分桶，不能用一个全局 current_index。
+struct StreamReassembly {
     current_index: u32,
     last_complete_index: Option<u32>,
-    expected_shards: usize,
     parts: Vec<Vec<u8>>,
     assembled: Vec<u8>,
-    /// 检测到包序号跳变（丢包）时置位，交给调用方请求 IDR
     lost: bool,
 }
 
-impl Reassembler {
-    fn new() -> Self {
+impl Default for StreamReassembly {
+    fn default() -> Self {
         Self {
             current_index: u32::MAX,
             last_complete_index: None,
-            expected_shards: 0,
             parts: vec![],
             assembled: Vec::with_capacity(2 * 1024 * 1024),
             lost: false,
         }
     }
+}
 
-    /// 收一个分片；完整时返回重组后的 (stream_id, 完整包字节)。
-    /// 仅对视频流做序号连续性检测（audio/tracking 流序号独立）。
-    fn push(&mut self, stream_id: u16, idx: u32, shards: usize, shard: usize, bytes: &[u8]) -> Option<(u16, Vec<u8>)> {
+impl StreamReassembly {
+    fn push(&mut self, idx: u32, shards: usize, shard: usize, bytes: &[u8]) -> Option<Vec<u8>> {
         if shards == 0 || shard >= shards {
             return None;
         }
         if idx != self.current_index {
-            // 序号跳变检测：新包序号 should == last_complete+1
             if let Some(last) = self.last_complete_index {
                 if idx != last.wrapping_add(1) {
                     self.lost = true;
                 }
             }
             self.current_index = idx;
-            self.expected_shards = shards;
             self.parts = vec![Vec::new(); shards];
         }
         if shard >= self.parts.len() {
@@ -350,20 +497,40 @@ impl Reassembler {
             }
             self.last_complete_index = Some(idx);
             self.current_index = u32::MAX;
-            Some((stream_id, std::mem::take(&mut self.assembled)))
+            Some(std::mem::take(&mut self.assembled))
         } else {
             None
         }
     }
+}
 
-    /// 取出并清除丢包标志
-    fn take_lost(&mut self) -> bool {
-        std::mem::replace(&mut self.lost, false)
+/// 按 stream_id 分桶的重组器
+struct Reassembler {
+    streams: std::collections::HashMap<u16, StreamReassembly>,
+}
+
+impl Reassembler {
+    fn new() -> Self {
+        Self { streams: std::collections::HashMap::new() }
+    }
+
+    /// 收一个分片；完整时返回重组后的 (stream_id, 完整包字节)。
+    fn push(&mut self, stream_id: u16, idx: u32, shards: usize, shard: usize, bytes: &[u8]) -> Option<(u16, Vec<u8>)> {
+        let state = self.streams.entry(stream_id).or_default();
+        state.push(idx, shards, shard, bytes).map(|p| (stream_id, p))
+    }
+
+    /// 取出并清除所有流的丢包标志；只应对视频流触发 IDR。
+    fn take_lost(&mut self, stream_id: u16) -> bool {
+        self.streams
+            .get_mut(&stream_id)
+            .map(|s| std::mem::replace(&mut s.lost, false))
+            .unwrap_or(false)
     }
 }
 
 fn stream_video_and_track<F, P, B>(
-    stream: &mut TcpStream,
+    stream: &mut StreamChannel,
     control: &mut TcpStream,
     on_frame: &mut F,
     pose: &P,
@@ -378,6 +545,8 @@ where
     B: Fn() -> (f32, bool) + Send,
 {
     let mut reasm = Reassembler::new();
+    let session_start = Instant::now();
+    let mut tracking_index: u32 = 0;
     let mut tmp = vec![0u8; 64 * 1024];
     let mut carry: Vec<u8> = Vec::new();
     let pose_interval = Duration::from_millis((1000.0 / target_fps.max(1.0)) as u64);
@@ -403,7 +572,7 @@ where
                         Ok(h) => h,
                         Err(_) => break,
                     };
-                    let total = SHARD_PREFIX_SIZE + h.payload_len;
+                    let total = h.total_len();
                     if carry.len() < total {
                         break;
                     }
@@ -417,7 +586,7 @@ where
                         // AUDIO / HAPTICS / STATISTICS 由渲染端按需扩展，本版先丢弃
                     }
                     // 检测丢包 → 请求 IDR + 进入损坏期（push 之后检查标志）
-                    if reasm.take_lost() {
+                    if reasm.take_lost(STREAM_VIDEO) {
                         stream_corrupted = true;
                         let req = control_encode(&ClientControlPacket::RequestIdr).unwrap();
                         let _ = control.write_all(&req);
@@ -437,7 +606,8 @@ where
                 ..Default::default()
             };
             let track = Tracking {
-                target_timestamp: Duration::from_nanos(0), // SERVER_TIME_SYNC 简化；真机可接 NTP 同步
+                // 用会话开始以来的单调时间，服务端才能做姿态预测；固定 0 会让预测失效
+                target_timestamp: session_start.elapsed(),
                 device_motions: vec![(0, motion)], // 0 = head id（见 common::HEAD_ID）
                 ..Default::default()
             };
@@ -452,11 +622,12 @@ where
                 let mut frame = Vec::with_capacity(SHARD_PREFIX_SIZE + bytes.len());
                 frame.extend_from_slice(&shard_len.to_be_bytes());
                 frame.extend_from_slice(&STREAM_TRACKING.to_be_bytes());
-                frame.extend_from_slice(&(summary.tracking_sent as u32).to_be_bytes()); // packet index (BE)
+                frame.extend_from_slice(&tracking_index.to_be_bytes()); // packet index (BE)，每会话从 0 开始
                 frame.extend_from_slice(&1u32.to_be_bytes()); // shards_count
                 frame.extend_from_slice(&0u32.to_be_bytes()); // shard_index
                 frame.extend_from_slice(&bytes);
                 let _ = stream.write_all(&frame);
+                tracking_index = tracking_index.wrapping_add(1);
                 summary.tracking_sent += 1;
             }
             last_pose = Instant::now();
@@ -548,16 +719,29 @@ mod tests {
     }
 
     #[test]
+    fn reassembler_keeps_streams_independent() {
+        let mut r = Reassembler::new();
+        // 视频包 7 的第一片
+        assert!(r.push(STREAM_VIDEO, 7, 2, 0, b"VID-A").is_none());
+        // 音频包 9 插进来，不能清掉视频进度
+        assert!(r.push(STREAM_AUDIO, 9, 1, 0, b"AUDIO").is_some());
+        // 视频包 7 的第二片，应能完整拼出
+        let (sid, packet) = r.push(STREAM_VIDEO, 7, 2, 1, b"VID-B").expect("视频应完整");
+        assert_eq!(sid, STREAM_VIDEO);
+        assert_eq!(&packet, b"VID-AVID-B");
+    }
+
+    #[test]
     fn reassembler_detects_packet_loss() {
         let mut r = Reassembler::new();
         // 连续包 1、2 正常
         assert!(r.push(STREAM_VIDEO, 1, 1, 0, b"A").unwrap().1 == b"A");
         assert!(r.push(STREAM_VIDEO, 2, 1, 0, b"B").unwrap().1 == b"B");
-        assert!(!r.take_lost());
+        assert!(!r.take_lost(STREAM_VIDEO));
         // 跳到 5（丢 3、4）
         assert!(r.push(STREAM_VIDEO, 5, 1, 0, b"E").unwrap().1 == b"E");
-        assert!(r.take_lost(), "应检测到序号跳变");
-        assert!(!r.take_lost(), "标志应被清除");
+        assert!(r.take_lost(STREAM_VIDEO), "应检测到序号跳变");
+        assert!(!r.take_lost(STREAM_VIDEO), "标志应被清除");
     }
 
     #[test]
@@ -566,6 +750,9 @@ mod tests {
         assert_eq!(c.view_resolution, [1536, 1536]);
         assert!(c.refresh_rates.contains(&70.0));
         assert!((c.ipd_m - 0.063).abs() < 1e-6);
+        assert!((c.fov[0].left + 0.829).abs() < 1e-4);
+        assert!((c.fov[0].right - 0.829).abs() < 1e-4);
+        assert!((c.fov[1].down + 0.829).abs() < 1e-4);
     }
 
     /// 端到端连接测试：用一个遵循 ALVR v20 真实时序的模拟服务端，
@@ -600,9 +787,10 @@ mod tests {
             };
             eprintln!("[mock-server] ✓ TCP 控制通道已连回客户端 :{}", CONTROL_PORT);
 
-            // 3) 读客户端 hello
+            // 3) 读客户端 hello（mock 侧也保留 buffer，避免粘包）
+            let mut mock_buf: Vec<u8> = Vec::new();
             let hello: ClientConnectionResult =
-                read_control(&mut control, StdDuration::from_secs(3)).expect("读 hello 失败");
+                read_control(&mut control, &mut mock_buf, StdDuration::from_secs(3)).expect("读 hello 失败");
             match hello {
                 ClientConnectionResult::ConnectionAccepted { .. } => {
                     eprintln!("[mock-server] ✓ 收到客户端 hello（ConnectionAccepted + 能力集）");
@@ -616,26 +804,22 @@ mod tests {
                 session: "mock-session".into(),
                 negotiated: negotiated.into(),
             };
-            control.write_all(&control_encode(&sc).unwrap()).unwrap();
-            eprintln!("[mock-server] ✓ 下发 StreamConfig（1536x1536@70Hz wired=true）");
-            // 客户端 read_control 每次调用新建 buffer，粘包会丢失后续包；
-            // 真实 ALVR server 也是逐包发送，这里 pacing 模拟该节奏。
-            thread::sleep(StdDuration::from_millis(50));
-
-            // 5) 下发 DecoderConfig + StartStream
+            // 关键回归：三个控制包一次性写入，模拟真实 TCP 粘包；
+            // 旧 read_control 只返回第一包并丢掉剩余，会卡在「未收到 StartStream」。
             let dc = ServerControlPacket::DecoderConfig(DecoderInitializationConfig {
-                codec: "H264".into(),
+                codec: CodecType::H264,
                 config_buffer: vec![0x67, 0x42],
             });
-            control.write_all(&control_encode(&dc).unwrap()).unwrap();
-            thread::sleep(StdDuration::from_millis(50));
-            control.write_all(&control_encode(&ServerControlPacket::StartStream).unwrap()).unwrap();
-            eprintln!("[mock-server] ✓ 下发 DecoderConfig(H264) + StartStream");
+            let mut burst = control_encode(&sc).unwrap();
+            burst.extend_from_slice(&control_encode(&dc).unwrap());
+            burst.extend_from_slice(&control_encode(&ServerControlPacket::StartStream).unwrap());
+            control.write_all(&burst).unwrap();
+            eprintln!("[mock-server] ✓ 一次性下发 StreamConfig + DecoderConfig(H264) + StartStream");
 
             // 6) 读 StreamReady（客户端可能先发 ViewsConfig/keepalive，逐个跳过）
             let mut got_ready = false;
             for i in 0..8 {
-                let pkt: ClientControlPacket = read_control(&mut control, StdDuration::from_secs(3))
+                let pkt: ClientControlPacket = read_control(&mut control, &mut mock_buf, StdDuration::from_secs(3))
                     .unwrap_or_else(|e| panic!("读控制包#{}失败: {}", i, e));
                 eprintln!("[mock-server]   控制包#{}: {:?}", i, pkt);
                 if matches!(pkt, ClientControlPacket::StreamReady) {
@@ -666,7 +850,8 @@ mod tests {
                 }).unwrap();
                 payload.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x99]); // 伪 Annex B NAL
                 let mut frame = Vec::new();
-                frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+                // 真实 ALVR server：长度字段 = 整片长度 - 4 = 18 + payload - 4
+                frame.extend_from_slice(&((SHARD_PREFIX_SIZE + payload.len() - 4) as u32).to_be_bytes());
                 frame.extend_from_slice(&STREAM_VIDEO.to_be_bytes());
                 frame.extend_from_slice(&i.to_be_bytes());
                 frame.extend_from_slice(&1u32.to_be_bytes());
