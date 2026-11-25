@@ -122,17 +122,15 @@ int main() {
         }
         sendto(sock, (const char*)pkt, sizeof(pkt), 0, (sockaddr*)&addr, sizeof(addr));
 
-        // [HVR fix] 头显姿态同样来自 VR6DOF 的 SLAM，发到 9912 供 sink 回传服务端，
-        // 解决"头部移动画面不重新渲染"——旧的 9912 数据来自渲染器 IMU(Hmd.dll)，
-        // 在 IMU 无效时恒为单位四元数，服务端拿不到头姿就不会重新渲染。
+        // 头姿由渲染器 Hmd.dll 的 IMU 经 9912 提供（PCCastScreen 激活后有效）。
+        // 实测 VR6DOF 的 base+0xee6018 读出的前3个float与手柄H1位置相同，
+        // 是手柄数据而非头姿，发送到9912会污染头姿 → 场景/手柄渲染变形，故不再发。
         float headPkt[7];
-        memcpy(headPkt, headPose, sizeof(headPkt)); // [x,y,z,w, px,py,pz]
-        sendto(hsock, (const char*)headPkt, sizeof(headPkt), 0, (sockaddr*)&haddr, sizeof(haddr));
+        memcpy(headPkt, headPose, sizeof(headPkt));
 
         if (++sent % 300 == 0) {
-            fprintf(stderr, "[slam_bridge] 已推送 %d 包  H0 p=(%.3f,%.3f,%.3f) H1 p=(%.3f,%.3f,%.3f)  HEAD q=(%.3f,%.3f,%.3f,%.3f) p=(%.3f,%.3f,%.3f)\n",
-                    sent, pkt[0],pkt[1],pkt[2], pkt[7],pkt[8],pkt[9],
-                    headPkt[0],headPkt[1],headPkt[2],headPkt[3], headPkt[4],headPkt[5],headPkt[6]);
+            fprintf(stderr, "[slam_bridge] 已推送 %d 包  H0 p=(%.3f,%.3f,%.3f) H1 p=(%.3f,%.3f,%.3f)\n",
+                    sent, pkt[0],pkt[1],pkt[2], pkt[7],pkt[8],pkt[9]);
             fflush(stderr);
         }
         Sleep(16); // ~60fps

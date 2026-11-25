@@ -117,20 +117,19 @@ impl PoseInput {
             let mut buf = [0u8; 32];
             loop {
                 match sock.recv(&mut buf) {
-                    // [HVR fix] 只接受 28B 的 SLAM 头姿包(quat xyzw + pos xyz)。
-                    // 渲染器 Hmd.dll IMU 也往 9912 发 16B 包，但在 IMU 无效时
-                    // 恒为单位四元数，会覆盖真实的 SLAM 头姿导致头部不跟随。
-                    Ok(n) if n >= 28 => {
+                    // 头姿来自渲染器 Hmd.dll 的 IMU 融合(g_headRot)，16B quat xyzw。
+                    // PCCastScreen 激活后 IMU 有效(yaw随头动)，用它回传服务端渲染。
+                    // 过滤单位四元数：IMU 未激活时恒为(0,0,0,1)，不采信以免污染。
+                    Ok(n) if n >= 16 => {
                         let q = [
                             f32::from_le_bytes(buf[0..4].try_into().unwrap()),
                             f32::from_le_bytes(buf[4..8].try_into().unwrap()),
                             f32::from_le_bytes(buf[8..12].try_into().unwrap()),
                             f32::from_le_bytes(buf[12..16].try_into().unwrap()),
                         ];
-                        // 全零/单位四元数视为无效，不采信
                         let is_identity = q[0].abs() < 1e-6 && q[1].abs() < 1e-6
                             && q[2].abs() < 1e-6 && (q[3] - 1.0).abs() < 1e-6;
-                        if !is_identity {
+                        if !is_identity && q.iter().all(|v| v.is_finite()) {
                             qx_r.store(q[0].to_bits(), Ordering::Relaxed);
                             qy_r.store(q[1].to_bits(), Ordering::Relaxed);
                             qz_r.store(q[2].to_bits(), Ordering::Relaxed);
