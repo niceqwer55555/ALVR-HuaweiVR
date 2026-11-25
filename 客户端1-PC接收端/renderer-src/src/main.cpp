@@ -70,7 +70,15 @@ static void SendHeadPose() {
     ULONGLONG now = GetTickCount64();
     if (now - last < 5) return;
     last = now;
-    float pkt[4] = { g_headRot.x, g_headRot.y, g_headRot.z, g_headRot.w }; // Rust 侧 xyzw
+    // [HVR fix] 回传服务端的头姿必须清零 roll：
+    // g_headRot 是本地显示用的姿态，经过 swapPitchRoll=1 轴对调后 hr≈±180°
+    // （本地显示因 keep_level=1 会把 roll 归零所以看着正常）。
+    // 但服务端 SteamVR 按收到的四元数渲染视角，180° roll 会让整个场景倒置/错乱。
+    // 这里只保留 yaw/pitch（头朝哪看），roll 强制 0，与本地 keep_level 行为一致。
+    float hy, hp, hr;
+    DmHeadYawPitchRoll(g_headRot, &hy, &hp, &hr);
+    Quat clean = QuatFromYawPitchRoll(hy, hp, 0.0f);
+    float pkt[4] = { clean.x, clean.y, clean.z, clean.w }; // Rust 侧 xyzw
     sendto(g_imuUdp, (const char*)pkt, sizeof(pkt), 0, (sockaddr*)&g_sinkAddr, sizeof(g_sinkAddr));
 }
 
