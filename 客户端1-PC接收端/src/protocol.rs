@@ -27,6 +27,13 @@ pub const CONTROL_PORT: u16 = 9943;
 pub const HANDSHAKE_PACKET_SIZE: usize = 56;
 
 pub const STREAM_TRACKING: u16 = 0;
+
+// ALVR device id = Rust DefaultHasher 对 OpenVR 路径字符串的 u64 哈希
+// （见上游 alvr_common::inputs! 宏：hash_string("/user/head") 等）。
+// 服务端严格按这些 id 匹配 head/左右手柄，用 0 发 head 是不被识别的。
+pub const HEAD_ID: u64 = 6597919954511603000;          // "/user/head"
+pub const HAND_LEFT_ID: u64 = 16510716142922041250;    // "/user/hand/left"
+pub const HAND_RIGHT_ID: u64 = 17777980629871082968;   // "/user/hand/right"
 pub const STREAM_HAPTICS: u16 = 1;
 pub const STREAM_AUDIO: u16 = 2;
 pub const STREAM_VIDEO: u16 = 3;
@@ -324,6 +331,38 @@ pub enum DecodeError {
 impl From<bincode::Error> for DecodeError {
     fn from(e: bincode::Error) -> Self {
         DecodeError::Bincode(e)
+    }
+}
+
+#[cfg(test)]
+mod tracking_device_tests {
+    use super::*;
+
+    #[test]
+    fn device_ids_match_alvr_hash() {
+        // 与上游 alvr_common::hash_string("/user/head") 等一致
+        assert_eq!(HEAD_ID, 6597919954511603000);
+        assert_eq!(HAND_LEFT_ID, 16510716142922041250);
+        assert_eq!(HAND_RIGHT_ID, 17777980629871082968);
+    }
+
+    #[test]
+    fn tracking_with_three_devices_roundtrip() {
+        let t = Tracking {
+            target_timestamp: Duration::from_secs(2),
+            device_motions: vec![
+                (HEAD_ID, DeviceMotion::default()),
+                (HAND_LEFT_ID, DeviceMotion::default()),
+                (HAND_RIGHT_ID, DeviceMotion::default()),
+            ],
+            ..Default::default()
+        };
+        let bytes = bincode::serialize(&t).unwrap();
+        let back: Tracking = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.device_motions.len(), 3);
+        assert_eq!(back.device_motions[0].0, HEAD_ID);
+        assert_eq!(back.device_motions[1].0, HAND_LEFT_ID);
+        assert_eq!(back.device_motions[2].0, HAND_RIGHT_ID);
     }
 }
 

@@ -632,14 +632,43 @@ where
         // 定时回传 tracking（头姿）
         if Instant::now() - last_pose >= pose_interval {
             let (quat, pos) = pose();
-            let motion = DeviceMotion {
+            let head_motion = DeviceMotion {
                 pose: Pose { orientation: quat, position: pos },
                 ..Default::default()
             };
+            // [HVR] 手柄默认姿态：服务端严格按 hash id 匹配 head/左右手柄。
+            // 手柄真实 6DoF 由华为私有 SLAM 算（闭源 VR6DOF.dll），接收端拿不到；
+            // 这里用"头显前方握持位"的合理默认值，位置长度 > 0.05m 阈值，
+            // 让服务端判定为 6DoF（不会被 clamp 成 3DoF/埋在地板）。朝向跟随头显，
+            // 左右各偏移 ±0.22m、下方 0.30m、前方 0.35m（近似手臂自然握持位）。
+            let hand_pose = |lateral: f32| {
+                let right = if lateral > 0.0 { [1.0f32,0.0,0.0,0.0] } else { [1.0f32,0.0,0.0,0.0] };
+                // 位置在头显局部坐标：绕头显朝向旋转 (lateral, -0.30, -0.35)
+                let off = [lateral, -0.30f32, -0.35f32];
+                let rotate = |v: [f32;3]| {
+                    let (x,y,z,w) = (quat[0],quat[1],quat[2],quat[3]);
+                    // q * (v,0) * q^-1 的向量旋转
+                    let ix =  w*v[0] + y*v[2] - z*v[1];
+                    let iy =  w*v[1] + z*v[0] - x*v[2];
+                    let iz =  w*v[2] + x*v[1] - y*v[0];
+                    let iw = -x*v[0] - y*v[1] - z*v[2];
+                    [ ix*w + iw*(-x) + iy*(-z) - iz*(-y),
+                      iy*w + iw*(-y) + iz*(-x) - ix*(-z),
+                      iz*w + iw*(-z) + ix*(-y) - iy*(-x) ]
+                };
+                let p = rotate(off);
+                Pose { orientation: right, position: [pos[0]+p[0], pos[1]+p[1], pos[2]+p[2]] }
+            };
+            let left_motion = DeviceMotion { pose: hand_pose(-0.22), ..Default::default() };
+            let right_motion = DeviceMotion { pose: hand_pose(0.22), ..Default::default() };
             let track = Tracking {
                 // 用会话开始以来的单调时间，服务端才能做姿态预测；固定 0 会让预测失效
                 target_timestamp: session_start.elapsed(),
-                device_motions: vec![(0, motion)], // 0 = head id（见 common::HEAD_ID）
+                device_motions: vec![
+                    (HEAD_ID, head_motion),
+                    (HAND_LEFT_ID, left_motion),
+                    (HAND_RIGHT_ID, right_motion),
+                ],
                 ..Default::default()
             };
             if let Ok(bytes) = bincode::serialize(&track) {
@@ -675,7 +704,7 @@ where
         if Instant::now() - last_battery >= battery_interval {
             let (gauge, plugged) = battery();
             let pkt = control_encode(&ClientControlPacket::Battery(BatteryInfo {
-                device_id: 0, // HEAD_ID：与 tracking 的头 id 一致
+                device_id: HEAD_ID, // 与 tracking 的头 id 一致（官方客户端也用 *HEAD_ID）
                 gauge_value: gauge.clamp(0.0, 1.0),
                 is_plugged: plugged,
             })).unwrap();
