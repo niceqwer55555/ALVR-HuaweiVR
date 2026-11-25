@@ -1,0 +1,21 @@
+[package]
+name = "openxr"
+version = "0.18.0"
+edition = "2018"
+license = "MIT/Apache-2.0"
+description = "Compatibility shim: upstream openxr 0.18 API + Huawei loader link features"
+
+[dependencies]
+openxr_upstream = { package = "openxr", version = "0.18.0", default-features = false }
+openxr-sys = "0.10.0"
+
+[features]
+default = ["loaded"]
+loaded = ["openxr_upstream/loaded"]
+linked = ["openxr_upstream/linked"]
+static = ["openxr_upstream/static"]
+mint = ["openxr_upstream/mint"]
+# Huawei fork feature names used by ALVR client_openxr. They intentionally map to
+# the standard linked loader; the Huawei loader is supplied as libopenxr_loader.so.
+huawei-loader-linked = ["linked"]
+huawei-openxr-1-0-3 = []

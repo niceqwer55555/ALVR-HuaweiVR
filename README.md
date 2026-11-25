@@ -134,3 +134,26 @@ ALVR-HuaweiVR-完整交付包/
 ## 5. 复现编译
 
 见 `docs/02-服务端编译复现.md`（服务端）与各客户端目录下的 `README.md` / `docs/`。所有编译命令均在本次交付中实际执行过。
+
+## GitHub Actions 一键编译
+
+仓库根目录新增 `.github/workflows/build-all.yml`，在 Actions 页面手动运行，或推送 `v*` tag 触发。三个并行任务：
+
+- `windows-server`：Ubuntu + MinGW-w64 posix 交叉编译 `alvr_dashboard`、`alvr_launcher`、`alvr_server_core`、`alvr_server_openvr`，产出 `ALVR-HuaweiVR-Windows.zip`（含 `driver_alvr_server.dll`、FFmpeg 与 MinGW 运行库、`hw-usb-driver`）。
+- `android-generic`：Android SDK 34 / NDK r25c 编译通用高通接收端，产出 `GenericALVR-arm64.apk`。
+- `android-huawei`：Rust `armv7-linux-androideabi` + 华为 OpenXR loader 编译客户端②，产出 `HuaweiVRGlass-armv7.apk`。
+
+构建所需的华为 SDK 运行库已放在 `sdk/`（仅保留编译必需的 loader、头文件、`hvrbridge.jar`、`hvrprompt.aar`，原始 zip 未入库）。客户端②使用 `deps/openxrs-huawei/openxr` 兼容层对接上游 `openxr 0.18`，华为 loader 以 `libopenxr_loader.so` 参与链接；它不是华为私有 Rust fork 的等价替代，运行时仍需在真机验证 OpenXR 扩展与生命周期。
+
+本地复现：
+
+```bash
+# 客户端②原生库 + APK
+export ANDROID_NDK_HOME=/path/to/android-ndk-r25c
+export ANDROID_SDK_ROOT=/path/to/android-sdk
+bash "客户端2-安卓接收端(依赖华为框架)/client_openxr/scripts/build_native.sh"
+bash "客户端2-安卓接收端(依赖华为框架)/client_openxr/scripts/build_linux.sh"
+
+# Windows 服务端打包（先完成 Rust 交叉编译）
+bash scripts/package-windows.sh
+```

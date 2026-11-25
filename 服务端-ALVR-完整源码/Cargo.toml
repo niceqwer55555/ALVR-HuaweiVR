@@ -20,8 +20,9 @@ members = [
     "alvr/vrcompositor_wrapper",
     "alvr/vulkan_layer",
     "alvr/xtask",
+    "alvr/client_openxr",
 ]
-exclude = ["deps/openxrs-huawei/openxr", "deps/openxrs-huawei/sys"]
+exclude = []
 
 [workspace.package]
 version = "20.14.1"

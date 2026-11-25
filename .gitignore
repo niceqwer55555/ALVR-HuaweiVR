@@ -37,3 +37,6 @@ crash_log.txt
 # ===== 本轮大体积编译交付（GitHub 单文件/仓库体积考虑，放 Releases 或飞书云盘） =====
 产物/Windows-全量编译-20261125/
 产物/Windows-全量编译-20261125.zip
+
+# 工作流本地打包输出
+dist/
