@@ -1,14 +1,14 @@
 # 通用安卓 ALVR 接收端（去华为化）
 
-一个**完全不依赖华为 VR 框架**的 Android 平台桥 / 诊断壳：负责手机 IMU 姿态、外部姿态注入、高通解码器枚举、设备与手柄状态显示，并预留 SurfaceView 给后续 OpenXR/解码渲染。
+一个**不依赖华为系统框架**的 Android 客户端：内含完整 `alvr_client_openxr` 原生串流核心、手机 IMU 姿态、外部姿态注入、高通解码器枚举与设备状态显示。
 
-> 边界说明：本工程**不是**完整 ALVR 串流客户端。ALVR 控制协议、H.264 解码和双目 SBS 渲染需要 `alvr_client_core` + OpenXR runtime，当前仓库未包含这部分源码；APK 可安装、可验证 JNI/传感器/解码器，但不会直接出串流画面。
+> 边界说明：APK 已经打包完整 `alvr_client_openxr`（含 ALVR 控制协议、H.264/HEVC 解码、OpenXR 渲染栈）与华为 OpenXR loader。要出串流画面，设备仍需有可用的 OpenXR runtime（华为 VR 系统服务或对应设备的系统 runtime）。
 
 ## 核心特性
 
 | 需求 | 实现 |
 |---|---|
-| 不依赖华为 VR 框架 | 无 `libxr_loader.so`/`libvrsdk.so`/`libvrpose.so`/`com.huawei.*` 权限；平台桥只依赖 Android 标准 API |
+| 去华为系统框架 | 不声明 `com.huawei.*` 权限；平台桥只用 Android 标准 API，渲染走标准 OpenXR 客户端栈 |
 | 高通解码器 | `c2.qti.avc.decoder` → `OMX.qcom.video.decoder.avc` 优先级；**禁止软解**，无硬解则报错不静默降级 |
 | 3DoF/6DoF 手柄 | 双模聚合器；每只手柄独立 Mahony 姿态解算；位置有效位自动切换 3DoF/6DoF |
 | 自己算姿态 | 陀螺积分 + 加速度重力校正（Mahony 互补滤波），纯 C 数学，零平台依赖 |
@@ -41,7 +41,7 @@ hvr-alvr-android-generic/
 | C 核心单测（姿态/手柄/解码器/runtime 桥/HID 协议/三设备指示灯） | `gcc` 编译运行 **56/56 PASS** |
 | Rust 客户端逻辑单测 | `cargo test` **8/8 PASS** |
 | 去华为化静态检查 | 候选链无任何 `hisi`/华为组件 |
-| APK 编译 | **已产出** `build/GenericALVR-arm64.apk`（29 KB，arm64-v8a，v2/v3 签名）；aapt2 显示 `native-code: arm64-v8a`、`launchable-activity: com.generic.alvr.AlvrActivity` |
+| APK 编译 | **已产出** `build/GenericALVR-arm64.apk`（约 4 MB，arm64-v8a，v2/v3 签名）；内含完整 `libalvr_client_openxr.so`（9.1 MB）与 `libxr_loader.so` |
 
 ## 快速开始
 

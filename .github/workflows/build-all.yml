@@ -100,7 +100,14 @@ jobs:
           sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;25.2.9519653"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> "$GITHUB_ENV"
 
-      - name: 编译通用 APK
+      - uses: dtolnay/rust-toolchain@1.82.0
+        with:
+          targets: aarch64-linux-android
+
+      - name: 编译完整 ALVR arm64 原生客户端
+        run: bash "客户端3-安卓接收端(高通/去华为框架)/scripts/build_full_native.sh"
+
+      - name: 打包完整通用 APK
         run: bash "客户端3-安卓接收端(高通/去华为框架)/scripts/build_apk.sh"
 
       - uses: actions/upload-artifact@v4
@@ -132,9 +139,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.82.0
         with:
-          targets: armv7-linux-androideabi
+          targets: armv7-linux-androideabi,aarch64-linux-android
 
-      - name: 编译 ARMv7 原生库
+      - name: 编译 ARMv7 + ARM64 原生库
         run: bash "客户端2-安卓接收端(依赖华为框架)/client_openxr/scripts/build_native.sh"
 
       - name: 打包华为框架 APK

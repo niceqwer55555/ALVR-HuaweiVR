@@ -97,3 +97,27 @@ pub extern "system" fn Java_com_lht_huaweivr_alvr_HuaweiVrActivity_nativeStop(
         error!("[HVR-DIAG] Huawei Java Activity shutdown failed: {error}");
     }
 }
+
+// 客户端③（通用包名）复用同一份完整 ALVR 原生客户端。
+// JNI 符号按 Java 包名生成，这里为 com.generic.alvr.AlvrActivity 提供别名。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_generic_alvr_AlvrActivity_nativeStart(
+    env: JNIEnv<'_>,
+    activity: JObject<'_>,
+    surface: JObject<'_>,
+) {
+    alvr_client_core::init_logging();
+    if let Err(error) = start(&env, &activity, &surface) {
+        error!("[Generic] AlvrActivity startup failed: {error}");
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_generic_alvr_AlvrActivity_nativeStop(
+    _env: JNIEnv<'_>,
+    _activity: JObject<'_>,
+) {
+    if let Err(error) = stop() {
+        error!("[Generic] AlvrActivity shutdown failed: {error}");
+    }
+}

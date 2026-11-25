@@ -4,8 +4,8 @@
      改用标准 OpenXR loader 权限。包名 com.generic.alvr 与华为无任何关系。 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.generic.alvr"
-    android:versionCode="1"
-    android:versionName="1.0">
+    android:versionCode="2"
+    android:versionName="2.0">
 
     <uses-feature android:glEsVersion="0x00030002" android:required="true" />
     <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />

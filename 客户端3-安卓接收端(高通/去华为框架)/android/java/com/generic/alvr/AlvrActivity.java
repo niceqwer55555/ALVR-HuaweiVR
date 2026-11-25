@@ -15,6 +15,7 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
@@ -67,6 +68,14 @@ public class AlvrActivity extends Activity implements SensorEventListener {
         System.loadLibrary("generic_alvr_bridge");
     }
 
+    static {
+        // 完整 ALVR 客户端库；缺失时保留诊断壳功能，不崩溃。
+        try {
+            System.loadLibrary("alvr_client_openxr");
+        } catch (Throwable ignored) {
+        }
+    }
+
     private native void nativeInit(int viewW, int viewH, int refreshHz, boolean positionTracking);
     private native void nativeFeedImu(int type, float x, float y, float z, long tNanos);
     private native boolean nativeFeedPoseText(String text);
@@ -85,6 +94,8 @@ public class AlvrActivity extends Activity implements SensorEventListener {
     private native void nativeGetControllerStatus(int hand, int[] out);
     private native void nativeSetControllerBattery(int hand, int batteryPercent);
     private native void nativeGetDeviceStatus(int[] out);
+    private native void nativeStart(Surface surface);
+    private native void nativeStop();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -160,7 +171,33 @@ public class AlvrActivity extends Activity implements SensorEventListener {
             Log.i(TAG, "recenter");
         });
 
+        android.widget.Button startButton = new android.widget.Button(this);
+        startButton.setAllCaps(false);
+        startButton.setText("启动完整 ALVR 串流");
+        startButton.setTextColor(0xffffffff);
+        startButton.setBackgroundColor(0xff2cb2c7);
+        FrameLayout.LayoutParams startLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        startLp.bottomMargin = dp(24);
+        startButton.setOnClickListener(v -> startFullClient());
+        root.addView(startButton, startLp);
+
         setContentView(root);
+    }
+
+    private void startFullClient() {
+        try {
+            Surface surface = surfaceView.getHolder().getSurface();
+            if (surface == null || !surface.isValid()) {
+                Log.w(TAG, "Surface 尚未就绪，无法启动完整客户端");
+                return;
+            }
+            nativeStart(surface);
+            Log.i(TAG, "完整 ALVR 客户端已启动");
+        } catch (Throwable error) {
+            Log.e(TAG, "完整 ALVR 客户端启动失败", error);
+        }
     }
 
     private TextView makeLed(int color) {
@@ -216,6 +253,10 @@ public class AlvrActivity extends Activity implements SensorEventListener {
         running = false;
         if (udpThread != null) udpThread.interrupt();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        try {
+            nativeStop();
+        } catch (Throwable ignored) {
+        }
         nativeRecenter();
         super.onDestroy();
     }

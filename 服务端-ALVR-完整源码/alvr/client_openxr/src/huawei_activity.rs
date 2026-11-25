@@ -97,3 +97,22 @@ pub extern "system" fn Java_com_lht_huaweivr_alvr_HuaweiVrActivity_nativeStop(
         error!("[HVR-DIAG] Huawei Java Activity shutdown failed: {error}");
     }
 }
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_generic_alvr_AlvrActivity_nativeStart(
+    env: JNIEnv<'_>, activity: JObject<'_>, surface: JObject<'_>,
+) {
+    alvr_client_core::init_logging();
+    if let Err(error) = start(&env, &activity, &surface) {
+        error!("[Generic] AlvrActivity startup failed: {error}");
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_generic_alvr_AlvrActivity_nativeStop(
+    _env: JNIEnv<'_>, _activity: JObject<'_>,
+) {
+    if let Err(error) = stop() {
+        error!("[Generic] AlvrActivity shutdown failed: {error}");
+    }
+}

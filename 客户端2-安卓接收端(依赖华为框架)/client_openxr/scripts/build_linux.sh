@@ -100,6 +100,12 @@ if [ ! -f "$NATIVE_SO" ]; then
   exit 1
 fi
 cp "$NATIVE_SO" "$WORK/lib/armeabi-v7a/libalvr_client_openxr.so"
+NATIVE_SO64="$ROOT/服务端-ALVR-完整源码/target/aarch64-linux-android/release/libalvr_client_openxr.so"
+if [ -f "$NATIVE_SO64" ]; then
+  mkdir -p "$WORK/lib/arm64-v8a"
+  cp "$NATIVE_SO64" "$WORK/lib/arm64-v8a/libalvr_client_openxr.so"
+  cp "$SDK_HW/jni/arm64-v8a/libxr_loader.so" "$WORK/lib/arm64-v8a/"
+fi
 
 # 合并 APK
 cp "$WORK/base.apk" "$WORK/final.apk"

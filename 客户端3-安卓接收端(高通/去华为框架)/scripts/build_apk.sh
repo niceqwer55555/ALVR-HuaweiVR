@@ -69,6 +69,22 @@ INC="-Isrc/pose -Isrc/controller -Isrc/decoder -Isrc/runtime -Isrc/hid"
   -o build/apkwork/lib/arm64-v8a/libgeneric_alvr_bridge.so
 cp build/apkwork/lib/arm64-v8a/libgeneric_alvr_bridge.so build/android/lib/arm64-v8a/
 
+# 完整 ALVR 客户端原生库（arm64），没有它 APK 只剩诊断壳
+FULL_SO="${ALVR_FULL_SO:-$ROOT/../../服务端-ALVR-完整源码/target/aarch64-linux-android/release/libalvr_client_openxr.so}"
+if [ -f "$FULL_SO" ]; then
+  cp "$FULL_SO" build/apkwork/lib/arm64-v8a/libalvr_client_openxr.so
+  echo "  -> libalvr_client_openxr.so $(du -h "$FULL_SO" | cut -f1)"
+else
+  echo "  [警告] 未找到 $FULL_SO，将不会打包完整客户端原生库"
+fi
+
+# 华为 OpenXR loader（arm64），由 ALVR 原生客户端链接
+LOADER="${ALVR_OPENXR_LOADER:-$ROOT/../../sdk/hvrsdk-openxr-3.5.0.79/jni/arm64-v8a/libxr_loader.so}"
+if [ -f "$LOADER" ]; then
+  cp "$LOADER" build/apkwork/lib/arm64-v8a/libxr_loader.so
+  echo "  -> libxr_loader.so"
+fi
+
 echo "=== 2. 可选 OpenXR runtime 库 ==="
 if [ -f src/runtime/runtime_openxr.c ] && [ -n "${OPENXR_HEADERS:-}" ]; then
   "$CC" $CFLAGS $INC -I"$OPENXR_HEADERS" -shared \
@@ -88,7 +104,7 @@ echo "=== 3. aapt2 生成基础 APK ==="
   -I "$PLATFORM/android.jar" \
   --manifest android/AndroidManifest.xml \
   --java build/apkwork/gen \
-  --min-sdk-version 24 --target-sdk-version 34
+  --min-sdk-version 26 --target-sdk-version 34
 
 echo "=== 4. javac 编译 Java host ==="
 "$JAVAC" -encoding UTF-8 -source 8 -target 8 \
