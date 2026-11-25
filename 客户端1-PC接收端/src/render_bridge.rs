@@ -203,7 +203,10 @@ impl HandPoseInput {
         if st == 0 || now.wrapping_sub(st) > 3 { return None; }
         let f = |i: usize| f32::from_bits(self.data[i].load(Ordering::Relaxed));
         // 包布局: hand0 = pos(0..3) quat(3..7), hand1 = pos(7..10) quat(10..14)
-        let q = |i: usize| [f(i+3), f(i+4), f(i+5), f(i+6)];
+        // [HVR fix] slam_bridge 发的 quat 是 (qw,qx,qy,qz) 顺序（cpp: pkt[3]=qw...），
+        // 但 ALVR 服务端 Pose.orientation 用 xyzw。原来直接透传导致 w/x 互换，
+        // 手柄朝向错误 → SteamVR 无法正确识别 6DoF 手柄。这里重排成 xyzw。
+        let q = |i: usize| [f(i+4), f(i+5), f(i+6), f(i+3)]; // (qw,qx,qy,qz) -> (x,y,z,w)
         let p = |i: usize| [f(i), f(i+1), f(i+2)];
         // VR6DOF 的 hand0 常为 0（单手在线），hand1 有数据；按位置 x 符号映射到左右手
         let (a_q,a_p,b_q,b_p) = (q(0),p(0),q(7),p(7));
