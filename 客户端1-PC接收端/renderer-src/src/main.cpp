@@ -991,11 +991,15 @@ static int RunDesktopMode() {
     }
     DmSettingsLoad(&g_st);
     g_settingsDirty = false;
-    // 每次重开桌面模式都从 2D 开始（上次的 SBS 模式不带过来）
-    if (g_st.sbsMode != 0) {
+    // [HVR fix] 只在本地桌面投屏(frameSource==1)时强制从 2D 开始：
+    // 本地桌面是单幅画面，用 SBS 会显示不对。
+    // 但网络串流(frameSource==0，SteamVR/ALVR)的视频帧是 SBS 左右拼接，
+    // 必须保留上一次的 sbsMode=1，否则每次重启都被重置成 2D → 双眼显示同一幅
+    // 拼接帧，画面错乱。这正是"双眼显示不对"且 ini 里 mode 总被写回 0 的根因。
+    if (g_st.frameSource == 1 && g_st.sbsMode != 0) {
         g_st.sbsMode = 0;
         DmSettingsSave(&g_st);
-        DmLog("启动：3D 模式已重置为 2D");
+        DmLog("启动：本地桌面模式，3D 模式已重置为 2D");
     }
     if (g_st.verboseLog) g_logVerbose = true;
     DmLog("面板朝向：相机滚转 左%.0f°/右%.0f°，贴屏旋转 左%.0f°/右%.0f° 翻转180=%d | 跟随 move_rate=%.0f°/s settle=%.2fs tau=%.2fs | imu=%d src=%d", g_st.rollLeft, g_st.rollRight, g_st.eyeRot[0], g_st.eyeRot[1], g_st.flip180, g_st.moveRateDeg, g_st.settleSec, g_st.tau, g_st.imuEnabled, g_st.imuSource);
